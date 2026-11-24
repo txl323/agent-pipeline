@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>演示数据库浏览器</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6fa; color: #333; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tab { padding: 6px 16px; border-radius: 18px; border: 1px solid #dcdfe6; background: #fff;
+    cursor: pointer; font-size: 14px; }
+  .tab.active { background: #4a6cf7; color: #fff; border-color: #4a6cf7; }
+  .tables { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tbl-btn { padding: 4px 12px; border-radius: 6px; border: 1px solid #e4e7ed; background: #fff;
+    cursor: pointer; font-size: 13px; color: #555; }
+  .tbl-btn.active { background: #eef2ff; color: #4a6cf7; border-color: #4a6cf7; }
+  .bar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .bar input, .bar select { padding: 6px 10px; border: 1px solid #dcdfe6; border-radius: 6px;
+    font-size: 13px; outline: none; }
+  .bar input:focus, .bar select:focus { border-color: #4a6cf7; }
+  .bar button { padding: 6px 16px; border: none; border-radius: 6px; background: #4a6cf7;
+    color: #fff; cursor: pointer; font-size: 13px; }
+  .bar button:hover { background: #3a5ce5; }
+  .info { color: #888; font-size: 12px; margin-left: auto; }
+  .card { background: #fff; border: 1px solid #ececf1; border-radius: 12px; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th { background: #f7f8fc; color: #666; text-align: left; padding: 8px 12px;
+    border-bottom: 1px solid #ececf1; white-space: nowrap; position: sticky; top: 0; }
+  td { padding: 8px 12px; border-bottom: 1px solid #f2f3f7; white-space: nowrap; }
+  tr:hover td { background: #fafbff; }
+  .empty { padding: 40px; text-align: center; color: #999; }
+  .err { padding: 20px; color: #e5484d; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>演示数据库浏览器</h1>
+  <div class="sub">bom_system（BOM 系统）· mdm_platform（主数据平台）· sap_mock（SAP 模拟）｜订单数据：2026-10-24 ~ 2026-11-23</div>
+  <div class="tabs" id="tabs"></div>
+  <div class="tables" id="tables"></div>
+  <div class="bar">
+    <input id="kw" placeholder="关键词（物料/供应商/客户名称）" style="width:220px">
+    <select id="d1"><option value="">开始日期</option></select>
+    <select id="d2"><option value="">结束日期</option></select>
+    <button onclick="load()">查询</button>
+    <span class="info" id="info"></span>
+  </div>
+  <div class="card" id="card">
+    <div class="empty">请选择左侧数据表</div>
+  </div>
+</div>
+<script>
+const API = '/db';
+const SYSTEMS = {
+  'BOM 系统': [
+    { name: 'BOM 清单', path: '/api/bom/boms', key: 'boms', kw: null, date: false },
+    { name: 'BOM 明细', path: '/api/bom/boms/BOM-PB-001', key: 'items', kw: null, date: false, fixed: true },
+    { name: '物料用途反查', path: '/api/bom/where-used?material_code=M10001', key: 'used_in', kw: null, date: false, fixed: true },
+  ],
+  '主数据平台': [
+    { name: '物料', path: '/api/mdm/materials', key: 'materials', kw: 'keyword', date: false },
+    { name: '供应商', path: '/api/mdm/suppliers', key: 'suppliers', kw: 'keyword', date: false },
+    { name: '客户', path: '/api/mdm/customers', key: 'customers', kw: 'keyword', date: false },
+  ],
+  'SAP 模拟': [
+    { name: '采购订单', path: '/api/sap/purchase-orders', key: 'purchase_orders', kw: null, date: true },
+    { name: '销售订单', path: '/api/sap/sales-orders', key: 'sales_orders', kw: null, date: true },
+    { name: '库存', path: '/api/sap/inventory', key: 'inventory', kw: null, date: false },
+    { name: '按日销售汇总', path: '/api/sap/sales/daily', key: 'daily', kw: null, date: true },
+    { name: '按物料销售汇总', path: '/api/sap/sales/by-material', key: 'by_material', kw: null, date: true },
+    { name: '按供应商采购汇总', path: '/api/sap/purchase/by-supplier', key: 'by_supplier', kw: null, date: true },
+  ],
+};
+let curSys = null, curTbl = null;
+
+const tabsEl = document.getElementById('tabs');
+const tblsEl = document.getElementById('tables');
+const cardEl = document.getElementById('card');
+const infoEl = document.getElementById('info');
+const kwEl = document.getElementById('kw');
+const d1El = document.getElementById('d1');
+const d2El = document.getElementById('d2');
+
+// 日期下拉：2026-10-24 ~ 2026-11-23
+(function initDates() {
+  const start = new Date('2026-10-24'), end = new Date('2026-11-23');
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    const s = d.toISOString().slice(0, 10);
+    d1El.insertAdjacentHTML('beforeend', `<option>${s}</option>`);
+    d2El.insertAdjacentHTML('beforeend', `<option>${s}</option>`);
+  }
+  d1El.value = '2026-10-24'; d2El.value = '2026-11-23';
+})();
+
+// 系统页签
+Object.keys(SYSTEMS).forEach(sys => {
+  const b = document.createElement('div');
+  b.className = 'tab'; b.textContent = sys;
+  b.onclick = () => selectSys(sys);
+  tabsEl.appendChild(b);
+});
+
+function selectSys(sys) {
+  curSys = sys;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.textContent === sys));
+  tblsEl.innerHTML = '';
+  SYSTEMS[sys].forEach(t => {
+    const b = document.createElement('div');
+    b.className = 'tbl-btn'; b.textContent = t.name;
+    b.onclick = () => selectTbl(t, b);
+    tblsEl.appendChild(b);
+  });
+  cardEl.innerHTML = '<div class="empty">请选择数据表</div>';
+  infoEl.textContent = '';
+}
+
+function selectTbl(t, btn) {
+  curTbl = t;
+  document.querySelectorAll('.tbl-btn').forEach(b => b.classList.toggle('active', b === btn));
+  kwEl.style.display = t.kw ? '' : 'none';
+  d1El.style.display = t.date ? '' : 'none';
+  d2El.style.display = t.date ? '' : 'none';
+  load();
+}
+
+async function load() {
+  if (!curTbl) return;
+  const t = curTbl;
+  const url = new URL(API + t.path, location.origin);
+  if (t.kw && kwEl.value.trim()) url.searchParams.set(t.kw, kwEl.value.trim());
+  if (t.date) {
+    url.searchParams.set('start_date', d1El.value || '2026-10-24');
+    url.searchParams.set('end_date', d2El.value || '2026-11-23');
+  }
+  if (t.path.includes('purchase-orders') || t.path.includes('sales-orders'))
+    url.searchParams.set('limit', '500');
+  cardEl.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const rows = data[t.key] || [];
+    render(rows);
+  } catch (e) {
+    cardEl.innerHTML = `<div class="err">查询失败: ${e.message}</div>`;
+  }
+}
+
+function render(rows) {
+  infoEl.textContent = rows.length + ' 条';
+  if (!rows.length) { cardEl.innerHTML = '<div class="empty">无数据</div>'; return; }
+  const cols = Object.keys(rows[0]);
+  let html = '<table><thead><tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>';
+  for (const r of rows) {
+    html += '<tr>' + cols.map(c => {
+      let v = r[c];
+      if (v === null || v === undefined) v = '';
+      return `<td>${String(v)}</td>`;
+    }).join('') + '</tr>';
+  }
+  html += '</tbody></table>';
+  cardEl.innerHTML = html;
+}
+
+kwEl.addEventListener('keydown', e => { if (e.key === 'Enter') load(); });
+selectSys('BOM 系统');
+</script>
+</body>
+</html>

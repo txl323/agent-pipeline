@@ -1,0 +1,134 @@
+# 语义层 v1 —— 版本化定义，当代码管理
+# 事实表：sap_mock.sap_sales_orders / sap_purchase_orders / sap_inventory
+# 维度数据：mdm_platform（供应商区域/客户区域）
+
+version: "1.0.0"
+
+datasources:
+  sales: "sap_mock"
+  purchase: "sap_mock"
+  inventory: "sap_mock"
+
+metrics:
+  sales_amount:
+    name: 销售额
+    aliases: [销售金额, 卖了多少, 营收, 金额, GMV, 卖得怎么样]
+    sql: "SUM(so.amount)"
+    table: "sap_sales_orders so"
+    datasource: sales
+    is_default: true
+  sales_orders:
+    name: 订单数
+    aliases: [销售订单数, 单量, 订单量]
+    sql: "COUNT(*)"
+    table: "sap_sales_orders so"
+    datasource: sales
+  sales_qty:
+    name: 销售数量
+    aliases: [销量, 卖了多少件, 数量]
+    sql: "SUM(so.quantity)"
+    table: "sap_sales_orders so"
+    datasource: sales
+  purchase_amount:
+    name: 采购额
+    aliases: [采购金额, 采购总额, 买了多少]
+    sql: "SUM(po.amount)"
+    table: "sap_purchase_orders po"
+    datasource: purchase
+  purchase_orders:
+    name: 采购订单数
+    aliases: [采购单量]
+    sql: "COUNT(*)"
+    table: "sap_purchase_orders po"
+    datasource: purchase
+  inventory_qty:
+    name: 库存量
+    aliases: [库存, 现有库存, 剩多少]
+    sql: "SUM(inv.quantity)"
+    table: "sap_inventory inv"
+    datasource: inventory
+
+dimensions:
+  customer_region:
+    name: 客户区域
+    aliases: [区域, 地区, 大区, 华东, 华南, 华北, 西南, 华中]
+    column: "c.region"
+    join: "JOIN mdm_platform.md_customers c ON so.customer_code = c.customer_code"
+    applies_to: [sales]
+  material:
+    name: 物料
+    aliases: [物料, 产品, 商品, 品名]
+    column:
+      sales: "so.material_name"
+      purchase: "po.material_name"
+      inventory: "inv.material_name"
+    join: ""
+    applies_to: [sales, purchase, inventory]
+  material_code:
+    name: 物料编码
+    aliases: [编码]
+    column:
+      sales: "so.material_code"
+      purchase: "po.material_code"
+      inventory: "inv.material_code"
+    join: ""
+    applies_to: [sales, purchase, inventory]
+  customer:
+    name: 客户
+    aliases: [客户名, 客户名称, 买家]
+    column: "so.customer_name"
+    join: ""
+    applies_to: [sales]
+  order_date:
+    name: 日期
+    aliases: [时间, 按天, 每天, 日期]
+    column: "so.order_date"
+    join: ""
+    applies_to: [sales]
+    is_time: true
+  supplier:
+    name: 供应商
+    aliases: [供应商名, 供应商名称, 厂商]
+    column: "po.supplier_name"
+    join: ""
+    applies_to: [purchase]
+  supplier_region:
+    name: 供应商区域
+    aliases: []
+    column: "s.region"
+    join: "JOIN mdm_platform.md_suppliers s ON po.supplier_code = s.supplier_code"
+    applies_to: [purchase]
+  warehouse:
+    name: 仓库
+    aliases: [库房]
+    column: "inv.warehouse"
+    join: ""
+    applies_to: [inventory]
+
+# 时间宏：宏名 -> [起始日期, 结束日期]（由编译器展开为具体日期）
+time_macros:
+  last_month: "macro:last_month"
+  this_month: "macro:this_month"
+  last_7_days: "macro:last_7_days"
+  last_30_days: "macro:last_30_days"
+  all: "macro:all"
+
+# 过滤字段白名单（LLM 只能引用这些字段做过滤）
+filter_fields:
+  sales:
+    customer_region: {column: "c.region", ops: ["=", "IN"]}
+    material: {column: "so.material_name", ops: ["=", "IN", "LIKE"]}
+    material_code: {column: "so.material_code", ops: ["=", "IN"]}
+    customer: {column: "so.customer_name", ops: ["=", "IN", "LIKE"]}
+    status: {column: "so.status", ops: ["=", "IN"]}
+  purchase:
+    supplier: {column: "po.supplier_name", ops: ["=", "IN", "LIKE"]}
+    supplier_region: {column: "s.region", ops: ["=", "IN"]}
+    material: {column: "po.material_name", ops: ["=", "IN", "LIKE"]}
+    status: {column: "po.status", ops: ["=", "IN"]}
+  inventory:
+    warehouse: {column: "inv.warehouse", ops: ["=", "IN"]}
+    material: {column: "inv.material_name", ops: ["=", "IN", "LIKE"]}
+
+# 敏感列（结果输出前脱敏）
+sensitive_columns: []
