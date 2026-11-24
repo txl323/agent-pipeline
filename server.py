@@ -424,7 +424,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         sources = verify_reply_sources(sid, result["reply"])
 
         reply_content = result["reply"]
-        for cp in charts:
+        # 落库去重：只保留最后一个图表（重绘/美化迭代的中间图无保留价值）
+        for cp in charts[-1:]:
             reply_content += "\n<!--CHART:" + json.dumps(cp, ensure_ascii=False) + "-->"
         data["messages"].append({"role": "assistant", "content": reply_content})
         # 上下文压缩：按字符量触发，LLM 摘要保留关键事实

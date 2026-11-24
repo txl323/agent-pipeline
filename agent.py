@@ -51,7 +51,8 @@ D 类 → 直接回答，不调用工具。
 3. 用户没提 → 分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类或辅助统计查询 draw=false；
 4. 中间步骤/辅助性查询一律 draw=false，只有最终呈现给用户的结果才画图；
 5. 结果只有一行时系统不生成图表，你必须向用户解释原因并建议可画图的替代问法（各区域对比/按物料分布/按日期趋势）；
-6. 用户显式指定图型时必须传对应 chart_type：柱状图→bar、饼图→pie、折线图→line；用户未指定图型时传 auto（系统自动判断）。
+6. 用户显式指定图型时必须传对应 chart_type：柱状图→bar、饼图→pie、折线图→line；用户未指定图型时传 auto（系统自动判断）；
+7. 重绘/美化/调整图表类请求：只执行一次最终查询并画图（draw=true），中间尝试性查询一律 draw=false，严禁一轮回答产生多个图表。
 
 【第五步：回答规范】
 1. 所有数字必须来自工具返回结果，严禁编造；
@@ -358,6 +359,29 @@ def _compress_tool_result(tool: str, result) -> str:
     return text[:3000] + ("\n…（内容过长已截断）" if len(text) > 3000 else "")
 
 
+VERIFY_MAX_ROUNDS = 2  # 验证回环上限，防止死循环
+_VERIFY_SYSTEM = """你是数据分析验证员。根据对话历史判断已有数据是否足以回答用户最后的问题：
+- 数据充分、能直接回答 -> 只回复 PASS
+- 数据不足/数值明显异常/缺少关键维度或时间范围 -> 用一句话说明缺什么、需要补充什么查询（不要调用工具，不要展开分析）"""
+
+
+def _verify_check(client, model, messages: list[dict]) -> str | None:
+    """验证数据充分性。返回 None=通过；返回 str=需补充的查询说明。"""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": _VERIFY_SYSTEM}] + messages[-12:],
+            temperature=0.1,
+            max_tokens=200,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if not text or text.upper().startswith("PASS"):
+            return None
+        return text[:300]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_agent_stream(messages: list[dict], mode: str = "standard",
                      on_event: Callable | None = None) -> dict:
     """流式执行 Agent 循环。
@@ -375,6 +399,7 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     model = "deepseek-reasoner" if mode == "deep" else "deepseek-chat"
     evidences: list[dict] = []  # 本次运行收集的证据 [{url, title, excerpt}]
     trace: list[dict] = []  # 执行轨迹 [{round, tool, query, urls}]
+    verify_rounds = 0  # 验证回环计数
 
     for step in range(1, MAX_STEPS + 1):
         stream = client.chat.completions.create(
@@ -417,6 +442,17 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
 
         # 无工具调用 -> 完成
         if not tool_acc or finish != "tool_calls":
+            # 分析验证层：数据查询类问题检查数据充分性，不足时回环补充查询
+            if (mode != "off" and verify_rounds < VERIFY_MAX_ROUNDS
+                    and any(t.get("tool") in ("query_data", "free_query") for t in trace)):
+                verdict = _verify_check(client, model, messages)
+                if verdict:
+                    verify_rounds += 1
+                    trace.append({"round": step, "tool": "verify",
+                                  "query": "数据不足：" + verdict[:120], "urls": []})
+                    messages.append({"role": "user",
+                                     "content": f"（验证环节：已有数据不足以完整回答，原因：{verdict}。请继续调用工具补充查询，然后给出最终回复。）"})
+                    continue
             return {"reply": content_acc, "steps": step, "evidences": evidences, "trace": trace}
 
         # 记录 assistant 工具调用消息（reasoning 不回传）

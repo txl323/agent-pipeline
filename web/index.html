@@ -496,6 +496,8 @@ async function send() {
           chat.scrollTop = chat.scrollHeight;
         } else if (eventName === 'chart') {
           const turn = lastTurn();
+          // 同一轮内新图表替换旧图表，避免重绘/美化时堆叠多图
+          turn.querySelectorAll(':scope > .chartbox').forEach(b => b.remove());
           const box = document.createElement('div');
           box.className = 'chartbox';
           const st = document.createElement('div');
@@ -548,55 +550,72 @@ function renderChart(el, payload) {
   const cols = payload.columns;
   const rows = payload.rows;
   if (!rows.length) { chart.setOption({title: {text: '无数据', left: 'center', top: 'middle'}}); return; }
-  const dimCols = cols.filter(c => c !== 'value');
-  const isTime = dimCols.some(c => /date|日期|时间/.test(c));
-  const labels = rows.map(r => dimCols.map(c => r[cols.indexOf(c)]).join(' '));
-  const values = rows.map(r => Number(r[cols.indexOf('value')]));
+  // 自动识别维度列与数值列（兼容中文列名宽表）
+  const isNum = v => v !== null && v !== '' && !isNaN(Number(v));
+  const numIdx = [];
+  const dimIdx = [];
+  cols.forEach((c, i) => {
+    const sample = rows.slice(0, 5).map(r => r[i]).filter(v => v !== null && v !== '');
+    if (sample.length && sample.every(isNum)) numIdx.push(i); else dimIdx.push(i);
+  });
+  if (!numIdx.length) { chart.setOption({title: {text: '无数值列', left: 'center', top: 'middle'}}); return; }
+  const labels = rows.map(r => dimIdx.map(i => r[i]).join(' '));
+  const isTime = dimIdx.some(i => /date|日期|时间|周/.test(cols[i]));
+  const mkSeries = (type) => numIdx.map(i => ({
+    name: cols[i], type,
+    data: rows.map(r => Number(r[i])),
+    smooth: type === 'line', areaStyle: type === 'line' ? {opacity: 0.15} : undefined,
+  }));
   const ctype = payload.chart_type || 'auto';
   let option;
+  const legend = numIdx.length > 1 ? {data: numIdx.map(i => cols[i])} : undefined;
+  const pieSeries = {type: 'pie', radius: ['35%', '65%'],
+    data: rows.map((r, i) => ({name: labels[i], value: Number(r[numIdx[0]])}))};
   if (ctype === 'pie') {
     option = {
       tooltip: {trigger: 'item'},
-      series: [{type: 'pie', radius: ['35%', '65%'],
-        data: rows.map((r, i) => ({name: labels[i], value: values[i]}))}],
+      series: [pieSeries],
     };
   } else if (ctype === 'line') {
     option = {
       tooltip: {trigger: 'axis'},
+      legend,
       xAxis: {type: 'category', data: labels},
       yAxis: {type: 'value'},
-      series: [{type: 'line', data: values, smooth: true, areaStyle: {opacity: 0.15}}],
-      grid: {left: 50, right: 20, top: 20, bottom: 30},
+      series: mkSeries('line'),
+      grid: {left: 50, right: 20, top: legend ? 40 : 20, bottom: 30},
     };
   } else if (ctype === 'bar') {
     option = {
       tooltip: {trigger: 'axis'},
+      legend,
       xAxis: {type: 'category', data: labels, axisLabel: {rotate: labels.some(l => l.length > 6) ? 30 : 0}},
       yAxis: {type: 'value'},
-      series: [{type: 'bar', data: values}],
-      grid: {left: 50, right: 20, top: 20, bottom: 40},
+      series: mkSeries('bar'),
+      grid: {left: 50, right: 20, top: legend ? 40 : 20, bottom: 40},
     };
   } else if (isTime) {
     option = {
       tooltip: {trigger: 'axis'},
+      legend,
       xAxis: {type: 'category', data: labels},
       yAxis: {type: 'value'},
-      series: [{type: 'line', data: values, smooth: true, areaStyle: {opacity: 0.15}}],
-      grid: {left: 50, right: 20, top: 20, bottom: 30},
+      series: mkSeries('line'),
+      grid: {left: 50, right: 20, top: legend ? 40 : 20, bottom: 30},
     };
-  } else if (dimCols.length === 1 && rows.length <= 8) {
+  } else if (dimIdx.length === 1 && rows.length <= 8 && numIdx.length === 1) {
     option = {
       tooltip: {trigger: 'item'},
-      series: [{type: 'pie', radius: ['35%', '65%'],
-        data: rows.map((r, i) => ({name: labels[i], value: values[i]}))}],
+      series: [pieSeries],
     };
   } else {
     option = {
       tooltip: {trigger: 'axis'},
+      legend,
       xAxis: {type: 'category', data: labels, axisLabel: {rotate: labels.some(l => l.length > 6) ? 30 : 0}},
       yAxis: {type: 'value'},
-      series: [{type: 'bar', data: values}],
-      grid: {left: 50, right: 20, top: 20, bottom: 40},
+      series: mkSeries('bar'),
+      grid: {left: 50, right: 20, top: legend ? 40 : 20, bottom: 40},
     };
   }
   chart.setOption(option);
