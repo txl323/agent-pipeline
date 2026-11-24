@@ -402,6 +402,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                     ("plan_progress", {"step": min(plan_step, plan_total),
                                        "total": plan_total, "progress": progress}),
                 )
+                # tool_start 本身也要转发，plan 模式下不能吞掉
+                loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
             else:
                 loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
