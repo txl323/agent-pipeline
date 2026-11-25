@@ -354,6 +354,30 @@ def get_messages(sid: str) -> dict:
     return {"session_id": sid, "messages": visible}
 
 
+@app.post("/api/sql")
+async def run_sql(req: ChatRequest) -> dict:
+    """SQL 直执行：跳过 NL 解析，直接执行 SELECT（复用 free_query 五重守门）。
+
+    message 字段传 SQL 语句；session_id 可选（用于落库留痕）。
+    """
+    from nlsql import free_query
+    sql = (req.message or "").strip()
+    if not sql:
+        raise HTTPException(400, "SQL 为空")
+    result = free_query(sql, [])
+    if req.session_id:
+        try:
+            save_messages(req.session_id, [
+                {"role": "user", "content": "[SQL] " + sql},
+                {"role": "assistant", "content": json.dumps(
+                    {k: result.get(k) for k in ("ok", "error", "sql", "row_count", "elapsed_ms")},
+                    ensure_ascii=False)},
+            ])
+        except Exception:  # noqa: BLE001
+            pass
+    return result
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     sid = req.session_id
