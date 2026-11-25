@@ -51,7 +51,7 @@ D 类 → 直接回答，不调用工具。
 3. 用户没提 → 分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类或辅助统计查询 draw=false；
 4. 中间步骤/辅助性查询一律 draw=false，只有最终呈现给用户的结果才画图；
 5. 结果只有一行时系统不生成图表，你必须向用户解释原因并建议可画图的替代问法（各区域对比/按物料分布/按日期趋势）；
-6. 用户显式指定图型时必须传对应 chart_type：柱状图→bar、饼图→pie、折线图→line；用户未指定图型时传 auto（系统自动判断）；
+6. 用户显式指定图型时传对应 chart_type（柱状图→bar、饼图→pie、折线图→line），未指定传 auto；注意：图型最终由系统在看到数据后按数据形态决定，显式指定仅为偏好，与数据明显冲突时（如饼图配多行时间序列）系统会自动降级为合适图型；
 7. 重绘/美化/调整图表类请求：只执行一次最终查询并画图（draw=true），中间尝试性查询一律 draw=false，严禁一轮回答产生多个图表。
 
 【第五步：回答规范】
@@ -410,6 +410,38 @@ def _generate_report(client, model, reply: str) -> dict | None:
         return None
 
 
+def _decide_chart_type(columns: list, rows: list, row_count: int, preferred: str) -> str:
+    """数据返回后判定图型：显式指定仅为偏好，与数据形态冲突时降级。
+    规则：
+    - 有时间列（date/日期/时间/周）且行数>8 -> line
+    - 单维度列且行数<=8 -> pie
+    - 其他 -> bar
+    冲突降级：pie 遇多行/时间列 -> line 或 bar；line 无时间列 -> bar
+    """
+    cols = [str(c) for c in columns]
+    has_time = any(re.search(r"date|日期|时间|周", c, re.I) for c in cols)
+    dim_cols = [c for c in cols if c != "value"]
+    n = row_count or len(rows)
+    # 系统按数据形态计算的合适图型
+    if has_time and n > 8:
+        fit = "line"
+    elif len(dim_cols) <= 1 and n <= 8:
+        fit = "pie"
+    else:
+        fit = "bar"
+    # 显式偏好仅在适配时生效
+    if preferred in ("bar", "pie", "line"):
+        if preferred == fit:
+            return preferred
+        # 明显冲突：pie 遇多行或时间列；line 无时间列
+        if preferred == "pie" and (n > 8 or has_time):
+            return fit
+        if preferred == "line" and not has_time:
+            return "bar"
+        return preferred
+    return fit
+
+
 def run_agent_stream(messages: list[dict], mode: str = "standard",
                      on_event: Callable | None = None) -> dict:
     """流式执行 Agent 循环。
@@ -530,7 +562,12 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     "params": result.get("params", []),
                     "sem_ver": result.get("sem_ver", ""),
                     "plan_json": str(args.get("plan_json", "")),
-                    "chart_type": result.get("chart_type", "auto"),
+                    "chart_type": _decide_chart_type(
+                        result.get("columns", []),
+                        result.get("rows", []),
+                        result.get("row_count", 0),
+                        result.get("chart_type", "auto"),
+                    ),
                 })
             # 执行轨迹：记录本轮调用的工具与查阅的网页
             t_urls: list[str] = []
