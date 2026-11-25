@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent import SYSTEM_PROMPT, run_agent_stream
+from agent_lg import SYSTEM_PROMPT, run_agent_stream
 
 load_dotenv()
 
@@ -275,7 +275,7 @@ def _maybe_compress(messages: list[dict]) -> list[dict]:
 
     summary = None
     try:
-        from agent import _client
+        from agent_lg import _client
         client = _client()
         resp = client.chat.completions.create(
             model="deepseek-chat",
@@ -402,7 +402,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         plan_id, plan = load_running_plan(sid)
     if plan is None:
         try:
-            from agent import generate_plan
+            from agent_lg import generate_plan
             plan = generate_plan(req.message)
         except Exception:  # noqa: BLE001
             plan = None
@@ -510,4 +510,4 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8003)
+    uvicorn.run(app, host="127.0.0.1", port=8006)
