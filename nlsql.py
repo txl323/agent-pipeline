@@ -157,6 +157,15 @@ def compile_sql(plan: dict, allowed_regions: list[str] | None = None) -> tuple[s
     for f in plan.get("filters") or []:
         spec = sem["filter_fields"][ds][f["field"]]
         col = spec["column"]
+        # 过滤列引用 JOIN 别名（如 c.region）时，按列前缀补齐对应 JOIN
+        if "." in col:
+            prefix = col.split(".")[0] + "."
+            for dspec in sem["dimensions"].values():
+                dcol = dspec["column"]
+                if isinstance(dcol, dict):
+                    dcol = dcol.get(ds, "")
+                if dcol.startswith(prefix) and dspec.get("join") and dspec["join"] not in joins:
+                    joins.append(dspec["join"])
         op = f["op"]
         val = f.get("value")
         if op == "IN":
