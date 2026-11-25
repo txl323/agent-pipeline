@@ -445,7 +445,7 @@ def _decide_chart_type(columns: list, rows: list, row_count: int, preferred: str
 
 
 def run_agent_stream(messages: list[dict], mode: str = "standard",
-                     on_event: Callable | None = None) -> dict:
+                     on_event: Callable | None = None, plan: dict | None = None) -> dict:
     """流式执行 Agent 循环。
 
     mode: off / standard / deep
@@ -459,6 +459,12 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     emit = on_event or (lambda e, d: None)
     client = _client()
     model = "deepseek-reasoner" if mode == "deep" else "deepseek-chat"
+    # 计划注入：把计划步骤作为系统指令，驱动模型按步骤执行
+    if plan and plan.get("steps"):
+        steps_text = "\n".join(f"{i}. {s}" for i, s in enumerate(plan["steps"], 1))
+        plan_directive = ("【执行计划】请严格按以下计划执行，每完成一步再进行下一步，"
+                          f"全部步骤完成后给出最终回复：\n{steps_text}")
+        messages = [messages[0]] + [{"role": "system", "content": plan_directive}] + messages[1:]
     evidences: list[dict] = []  # 本次运行收集的证据 [{url, title, excerpt}]
     trace: list[dict] = []  # 执行轨迹 [{round, tool, query, urls}]
     verify_rounds = 0  # 验证回环计数

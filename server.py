@@ -412,7 +412,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
         def run_sync() -> dict:
-            return run_agent_stream(messages, mode=mode, on_event=on_event)
+            return run_agent_stream(messages, mode=mode, on_event=on_event, plan=plan)
 
         task = loop.run_in_executor(None, run_sync)
 
