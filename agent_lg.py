@@ -32,12 +32,14 @@ VERIFY_MAX_ROUNDS = 2
 
 SYSTEM_PROMPT = """你是一个能干的智能助手，通过技能（skills）完成用户的任务。
 
-【技能体系】系统提供以下技能（每个技能是一个目录，含 SKILL.md 说明与实现脚本）：
+【技能体系】系统提供以下技能（每个技能是一个目录，含 SKILL.md 说明与实现脚本）。此处只列出技能名与简介，详细用法须加载后获取：
 {skill_list}
+
+【技能加载（重要）】调用任何技能的底层工具前，必须先调用 load_skill(skill_name) 加载该技能的 SKILL.md 正文（含参数契约、决策规则与失败处理）。未加载技能直接调用其底层工具会被系统拒绝。
 
 【技能使用规范】
 1. 按任务分类选技能：业务数据类 → data-query；外部信息类 → web-search；导出需求 → export-csv；闲聊/翻译 → 直接回答；
-2. 技能的详细用法在技能说明中，调用工具时按参数规范传参；
+2. 技能的详细用法在 load_skill 加载的 SKILL.md 正文中，调用工具时按其参数契约传参；
 3. 一次规划：回答前想清楚需要哪几个查询，一次规划好再执行，不要查一步看一步；
 4. 数据复用：同一会话内已查到的数据直接复用，严禁对同一数据反复查询；
 5. 失败处理：工具返回 ok=false 时，根据 error 提示修正后重试（换指标名/维度名/调整 SQL），不要原样重试；
@@ -64,9 +66,10 @@ class AgentState(TypedDict):
     final_reply: str
 
 
-def _build_skill_tools(skills: dict) -> tuple[list[dict], dict]:
+def _build_skill_tools(skills: dict) -> tuple[list[dict], dict, dict]:
     tools: list[dict] = []
     registry: dict[str, Callable] = {}
+    skill_of: dict[str, str] = {}   # 底层工具名 -> 所属技能名（门禁用）
     for sk in skills.values():
         try:
             funcs = sk.load_scripts()
@@ -76,6 +79,7 @@ def _build_skill_tools(skills: dict) -> tuple[list[dict], dict]:
             if fname in registry:
                 continue
             registry[fname] = fn
+            skill_of[fname] = sk.name
             tools.append({
                 "type": "function",
                 "function": {
@@ -84,7 +88,7 @@ def _build_skill_tools(skills: dict) -> tuple[list[dict], dict]:
                     "parameters": {"type": "object", "properties": {}},
                 },
             })
-    return tools, registry
+    return tools, registry, skill_of
 
 
 _PARAM_SCHEMAS = {
@@ -103,6 +107,7 @@ _PARAM_SCHEMAS = {
     "fetch_url": ({"url": {"type": "string", "description": "网页地址"}}, ["url"]),
     "export_csv": ({"sql": {"type": "string", "description": "SELECT 语句"},
                     "filename": {"type": "string", "description": "导出文件名（可选）"}}, ["sql"]),
+    "load_skill": ({"skill_name": {"type": "string", "description": "要加载的技能名，如 data-query / web-search / export-csv"}}, ["skill_name"]),
 }
 
 
@@ -157,8 +162,19 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     emit = on_event
     skills = sr.load_skills()
     sr.init_memory()
-    tools, registry = _build_skill_tools(skills)
+    tools, registry, skill_of = _build_skill_tools(skills)
+    # load_skill 常驻工具：渐进式披露第二层入口（加载技能 SKILL.md 正文）
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": "load_skill",
+            "description": "加载技能的 SKILL.md 正文（含参数契约与决策规则）。调用任何技能的底层工具前必须先加载对应技能。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    })
     _patch_tool_schemas(tools)
+    # 已加载技能集合（门禁：未加载技能的底层工具拒绝执行）
+    loaded_skills: set[str] = set()
 
     skill_list = "\n".join(f"- {sk.name}: {sk.description}" for sk in skills.values())
     system_text = SYSTEM_PROMPT.replace("{skill_list}", skill_list).replace("{skill_memory}", sr.memory_context())
@@ -232,14 +248,33 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 except json.JSONDecodeError:
                     args = {}
             emit("tool_start", {"tool": fname, "args": args})
-            fn = registry.get(fname)
-            if fn is None:
-                result = {"ok": False, "error": f"未知工具: {fname}"}
-            else:
+            if fname == "load_skill":
+                # 渐进式披露第二层：按需加载技能正文
+                sname = str(args.get("skill_name", "")).strip()
                 try:
-                    result = fn(**args)
+                    body = sr.load_skill_body(sname)
+                    sk = skills.get(sname)
+                    ver = sk.version if sk else "unknown"
+                    loaded_skills.add(sname)
+                    result = {"ok": True, "skill": sname, "version": ver, "body": body}
+                    emit("skill_loaded", {"skill": sname, "version": ver,
+                                          "body_path": f"skills/{sname}/SKILL.md",
+                                          "resources": [f"skills/{sname}/SKILL.md"]})
                 except Exception as e:  # noqa: BLE001
-                    result = {"ok": False, "error": f"执行失败: {e}"}
+                    result = {"ok": False, "error": f"技能加载失败: {e}"}
+            elif skill_of.get(fname) and skill_of[fname] not in loaded_skills:
+                # 门禁：未加载技能的底层工具拒绝执行，引导模型先 load_skill
+                owner = skill_of[fname]
+                result = {"ok": False, "error": f"技能 {owner} 未加载：请先调用 load_skill（skill_name 为 {owner}）加载其 SKILL.md，阅读参数契约后再调用 {fname}"}
+            else:
+                fn = registry.get(fname)
+                if fn is None:
+                    result = {"ok": False, "error": f"未知工具: {fname}"}
+                else:
+                    try:
+                        result = fn(**args)
+                    except Exception as e:  # noqa: BLE001
+                        result = {"ok": False, "error": f"执行失败: {e}"}
             preview = json.dumps(result, ensure_ascii=False)[:200] if not isinstance(result, str) else result[:200]
             emit("tool_end", {"tool": fname, "preview": preview})
             # 图表事件：查询成功且非单行且 draw 时推送（与原版协议一致）
@@ -256,9 +291,14 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 })
             _collect_evidence(fname, args, result, evidences)
             ok = not (isinstance(result, dict) and result.get("ok") is False)
-            sr.remember_skill(fname.rsplit("_", 1)[0], fname, sid, ok, preview[:120])
+            if fname != "load_skill":
+                sr.remember_skill(skill_of.get(fname, fname), fname, sid, ok, preview[:120])
             trace.append({"round": step, "tool": fname, "query": str(args)[:120], "urls": []})
-            msgs.append(ToolMessage(content=_compress_tool_result(fname, result),
+            if fname == "load_skill" and isinstance(result, dict) and result.get("ok"):
+                content = ("（技能 " + str(result.get("skill")) + " 的 SKILL.md 已加载。请按以下用法调用该技能的底层工具：）" + chr(10) + chr(10) + str(result.get("body")))
+            else:
+                content = _compress_tool_result(fname, result)
+            msgs.append(ToolMessage(content=content,
                                     tool_call_id=str(tc.get("id") or f"call_{step}")))
         return {"messages": msgs, "trace": trace, "evidences": evidences, "pending_calls": []}
 

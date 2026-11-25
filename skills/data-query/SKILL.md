@@ -2,44 +2,58 @@
 name: data-query
 description: 业务数据查询技能。查询销售订单/采购订单/库存数据（指标汇总、分组对比、结构探索、表统计）。当用户询问销售额/订单数/采购额/库存量等业务指标，或问『有什么数据/什么表/数据范围』时使用。数据范围 2026-10-24 ~ 2026-11-23。
 ---
-
 # 数据查询技能
 
-通过数据查询服务（datasvc，HTTP API）访问业务库。SQL 编译与守门是服务内部实现细节，本技能只发 HTTP 请求。
+通过数据查询服务（datasvc，HTTP API http://127.0.0.1:8005）访问业务库。SQL 编译与守门是服务内部实现细节，本技能只发 HTTP 请求。
 
-## 能力清单
+## 适用场景
+- 业务指标问题：销售额/订单数/销售数量/采购额/采购订单数/库存量（单值、分组、对比、趋势）
+- 结构探索：『有什么数据/什么表/什么字段/数据范围多少条』
+- 表统计速查：行数/时间范围/维度基数
+- 不适用：业务库之外的外部信息（用 web-search 技能）、导出文件（用 export-csv 技能）
 
-| 能力 | 说明 | 适用场景 |
-|---|---|---|
-| query_data | Plan JSON 语义层查询（口径有保障） | 指标+维度+过滤在语义层内，优先使用 |
-| free_query | 受控 SELECT SQL（五重守门） | 语义层表达不了的长尾问题 |
-| explore_schema | 库表结构探索 | 『有什么数据/什么表/什么字段』 |
-| table_stats | 表统计速查（行数/时间范围/维度基数） | 『数据范围/多少条/有哪些维度值』 |
+## 前置条件
+- 数据查询服务 datasvc 已在 127.0.0.1:8005 运行（脚本内部处理，无需检查）
+- 业务三库只读：bom_system / mdm_platform / sap_mock
+- 数据时间范围 2026-10-24 ~ 2026-11-23
 
-## query_data 用法
+## 工作流程
+1. 判断问题类型：结构类 → explore_schema/table_stats；指标类 → query_data（优先）或 free_query
+2. 一次规划好需要的全部查询再执行，不要查一步看一步
+3. 同一会话已查到的数据直接复用，严禁对同一数据反复查询
+4. 优先用一次查询拿到全部所需数据（如带占比的分组查询），避免先查总量再逐个查明细
 
-参数 plan_json（Plan JSON 字符串）：
-- metric：sales_amount(销售额)/sales_orders(订单数)/sales_qty(销售数量)/purchase_amount(采购额)/purchase_orders(采购订单数)/inventory_qty(库存量)
-- dimensions：customer_region(客户区域)/material(物料)/material_code(物料编码)/customer(客户)/order_date(日期)/supplier(供应商)/supplier_region(供应商区域)/warehouse(仓库)
-- filters：[{field, op, value}]，可用字段：sales 库 customer_region/material/material_code/customer/status；purchase 库 supplier/supplier_region/material/status；inventory 库 warehouse/material
-- time_macro：last_month/this_month/last_7_days/last_30_days/all
-- draw：是否生成图表（分布/趋势/占比/对比 true；结构/单值/清单 false）
-- chart_type：bar/pie/line/auto
+## 参数契约
+完整契约（合法指标/维度/过滤字段/时间宏/物理列名映射）见 `references/plan_schema.md`（由语义层生成或手工同步）。要点：
 
-示例：`{"metric": "sales_amount", "dimensions": ["customer_region"], "time_macro": "all"}`
+- **query_data(plan_json, draw, chart_type)**：Plan JSON 语义层查询，口径有保障，优先使用
+  - metric：sales_amount/sales_orders/sales_qty/purchase_amount/purchase_orders/inventory_qty
+  - dimensions：customer_region/material/material_code/customer/order_date/supplier/supplier_region/warehouse
+  - filters：[{field, op, value}]，可用字段见 plan_schema.md
+  - time_macro：last_month/this_month/last_7_days/last_30_days/all
+  - draw：分布/趋势/占比/对比类多行数据 true；结构/单值/清单 false
+  - chart_type：bar/pie/line/auto
+- **free_query(sql)**：受控 SELECT，表必须带库名前缀（如 sap_mock.sap_sales_orders）。注意：material 是语义层合法维度，物理列名是 material_name
+- **explore_schema(database, table)**：库表结构探索，database 限 bom_system/mdm_platform/sap_mock
+- **table_stats(database, table)**：行数/时间范围（自动识别日期列）/低基数字段去重数
 
-## free_query 用法
+## 决策规则
+1. 语义层能表达（指标+维度+过滤都在 plan_schema.md 内）→ query_data（口径有保障，优先）
+2. 语义层表达不了（主数据统计/单价走势/占比计算/跨表计算）→ free_query 写 SELECT
+3. 不确定数据结构 → 先 explore_schema 再回来查询
+4. 用户问法有歧义（没说清指标/时间范围/对象）→ 先用选项式反问澄清，不要猜测
 
-参数 sql：SELECT 语句，表必须带库名前缀（如 sap_mock.sap_sales_orders）。守门规则：单条 SELECT/禁多语句/禁危险关键字/表白名单/强制 LIMIT+EXPLAIN。被拦截时按提示调整（加过滤/加 LIMIT/换白名单表）。
+## 失败处理
+- query_data 返回 ok=false：根据 error 提示修正后重试（换指标名/维度名/操作符大写）
+- free_query 被守门拦截：按提示调整 SQL（加过滤条件/加 LIMIT/换白名单内的表）
+- 工具失败时换写法再试，不要原样重试
 
-## explore_schema 用法
+## 输出约束
+- 所有数字必须来自工具返回结果，严禁编造
+- 查询结果已自动图表化展示给用户，回复默认只写 3-5 句关键结论与解读，不重复输出数据明细
+- 对比类问题主动覆盖隐含关注点（谁最高谁最低/差距多大/是否异常）
+- 结果只有一行时系统不生成图表，须向用户解释原因并建议可画图的替代问法
 
-参数 database（bom_system/mdm_platform/sap_mock，空返回全部表清单）、table（空返回该库全部表字段）。
-
-## table_stats 用法
-
-参数 database、table。返回行数、时间范围（自动识别日期列）、低基数字段去重数。
-
-## 实现位置
-
-脚本：scripts/data_query.py（HTTP 客户端，调用 http://127.0.0.1:8005）
+## 资源引用
+- `references/plan_schema.md`：合法指标/维度/过滤字段/时间宏/物理列名映射（参数契约唯一真相）
+- 脚本：`scripts/data_query.py`（HTTP 客户端，调用 http://127.0.0.1:8005）
