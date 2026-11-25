@@ -167,6 +167,24 @@ def verify_reply_sources(sid: str, reply: str) -> list[dict]:
     return result
 
 
+def load_running_plan(sid: str) -> tuple[int | None, dict | None]:
+    """跨轮延续：取会话中 running 状态的最新计划（id, plan）。"""
+    def op(conn):
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(
+                "SELECT id, plan_json FROM plans WHERE sid=%s AND status='running' ORDER BY id DESC LIMIT 1",
+                (sid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return None, None
+            try:
+                return row["id"], json.loads(row["plan_json"])
+            except Exception:  # noqa: BLE001
+                return None, None
+    return db_execute(op)
+
+
 def save_plan(sid: str, plan: dict) -> int:
     """计划落库，返回计划 ID。"""
     now = time.time()
@@ -353,13 +371,20 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     ]
 
     # 任务规划：复杂任务先生成计划（简单任务 plan 为 None）
+    # 跨轮延续：会话存在 running 状态的计划时复用，不重新生成
     plan = None
+    plan_id = None
     if mode != "off":
+        plan_id, plan = load_running_plan(sid)
+    if plan is None:
         try:
             from agent import generate_plan
             plan = generate_plan(req.message)
         except Exception:  # noqa: BLE001
             plan = None
+    # 新计划落库（复用的计划不重复落库）
+    if plan and plan_id is None:
+        plan_id = save_plan(sid, plan)
 
     # 标题：首条用户消息
     if not data.get("title"):
@@ -371,10 +396,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
         yield emit("session", {"session_id": sid, "mode": mode})
 
-        # 计划推送与落库
-        plan_id = None
+        # 计划推送（落库已在生成/复用时完成）
         if plan:
-            plan_id = save_plan(sid, plan)
             yield emit("plan", {"plan": plan})
 
         loop = asyncio.get_event_loop()
@@ -448,7 +471,12 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             yield emit("trace", {"trace": trace})
         if plan_id:
             try:
-                update_plan_progress(plan_id, 100, "done")
+                # 真实状态：本轮实际执行了工具，且回复末尾无【待确认】标记，
+                # 才标记完成；澄清/确认轮（模型显式标记）保持 running，供下一轮延续
+                reply_text = (result["reply"] or "").rstrip()
+                awaiting = "【待确认】" in reply_text[-30:]
+                if result["steps"] > 1 and not awaiting:
+                    update_plan_progress(plan_id, 100, "done")
             except Exception:  # noqa: BLE001
                 pass
         yield emit("end", {"steps": result["steps"]})

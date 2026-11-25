@@ -56,6 +56,7 @@ D 类 → 直接回答，不调用工具。
 
 【第五步：回答规范】
 1. 所有数字必须来自工具返回结果，严禁编造；
+1b. 当你需要用户澄清歧义、补充信息或确认口径时（计划暂停等待用户），回复末尾必须添加标记【待确认】；正常完成的回复不要添加该标记；
 2. 查询结果已自动图表化展示给用户，回复默认不重复输出数据明细，只写 3-5 句关键结论与解读（最高/最低/趋势/异常点/建议），可提及个别关键数字；仅当用户明确要求列出数据明细时才输出；
 3. 引用事实必须使用工具结果中出现的真实 URL，严禁凭记忆编造链接；
 4. 信息不足时明确说明，不猜测；
@@ -463,7 +464,9 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     if plan and plan.get("steps"):
         steps_text = "\n".join(f"{i}. {s}" for i, s in enumerate(plan["steps"], 1))
         plan_directive = ("【执行计划】请严格按以下计划执行，每完成一步再进行下一步，"
-                          f"全部步骤完成后给出最终回复：\n{steps_text}")
+                          f"全部步骤完成后给出最终回复：\n{steps_text}\n"
+                          "【重要】若执行中遇到歧义或缺少关键信息需要暂停等待用户确认，"
+                          "回复末尾必须添加标记【待确认】；正常完成的回复不要添加该标记。")
         messages = [messages[0]] + [{"role": "system", "content": plan_directive}] + messages[1:]
     evidences: list[dict] = []  # 本次运行收集的证据 [{url, title, excerpt}]
     trace: list[dict] = []  # 执行轨迹 [{round, tool, query, urls}]
