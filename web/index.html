@@ -107,8 +107,13 @@
   .trace { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
     padding: 10px 14px; margin-top: 8px; font-size: 13px; box-shadow: var(--shadow); }
   .trace .ttitle { color: var(--text-dim); margin-bottom: 6px; }
-  .trace .titem { margin-bottom: 6px; }
+  .trace .titem { position: relative; margin-bottom: 8px; padding-left: 18px; }
+  .trace .titem::before { content: ''; position: absolute; left: 3px; top: 6px;
+    width: 7px; height: 7px; border-radius: 50%; background: var(--primary); }
+  .trace .titem:not(:last-child)::after { content: ''; position: absolute; left: 6px; top: 16px;
+    bottom: -10px; width: 1px; background: var(--border-2); }
   .trace .thead { color: var(--text); }
+  .trace .tdur { color: var(--text-dim); font-size: 11px; margin-left: 6px; }
   .trace .ttool { display: inline-block; background: rgba(74,108,247,.12); color: var(--primary);
     border-radius: 4px; padding: 0 6px; margin-right: 6px; font-size: 12px; }
   .trace a { color: var(--primary); text-decoration: none; font-size: 12px; display: block;
@@ -575,6 +580,7 @@ async function send() {
           statusEl.textContent = '深度思考中…';
         } else if (eventName === 'tool_start') {
           if (!curTool) curTool = ensurePanel('tool');
+          curTool._t0 = Date.now();
           const line = '🔧 ' + payload.tool + ' ' + JSON.stringify(payload.args) + '\n';
           curTool.m.text += line;
           curTool.body.textContent += line;
@@ -582,7 +588,9 @@ async function send() {
         } else if (eventName === 'tool_end') {
           if (!curTool) curTool = ensurePanel('tool');
           const pv = payload.preview.startsWith('SQL:') ? payload.preview : payload.preview.slice(0, 100);
-          const line = '   ↳ ' + pv + '\n';
+          const ms = curTool._t0 ? Date.now() - curTool._t0 : null;
+          const dur = ms !== null ? '（' + (ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms') + '）' : '';
+          const line = '   ↳ ' + pv + dur + '\n';
           curTool.m.text += line;
           curTool.body.textContent += line;
           curTool.body.scrollTop = curTool.body.scrollHeight;
@@ -630,6 +638,12 @@ async function send() {
             tool.textContent = t.tool;
             head.appendChild(tool);
             head.appendChild(document.createTextNode('第' + t.round + '轮' + (t.query ? ' · ' + t.query : '')));
+            if (t.elapsed_ms !== undefined && t.elapsed_ms !== null) {
+              const dur = document.createElement('span');
+              dur.className = 'tdur';
+              dur.textContent = t.elapsed_ms >= 1000 ? (t.elapsed_ms / 1000).toFixed(1) + 's' : t.elapsed_ms + 'ms';
+              head.appendChild(dur);
+            }
             item.appendChild(head);
             for (const u of (t.urls || [])) {
               const a = document.createElement('a');
