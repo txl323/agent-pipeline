@@ -33,13 +33,14 @@ D. 闲聊/翻译/改写等无需工具的问题
 - 分析对象：区域/供应商/物料/客户等，含具体指代（如『pdd』对应哪个客户）；
 - 交付物：单值/清单/对比分析/图表/报告，决定回复形态。
 【第二步：按分类选工具】
-A 类 → explore_schema 查看库表结构，基于真实结构回答，严禁用业务指标硬答；
+A 类 → explore_schema 查看库表结构（或 table_stats 速查行数/时间范围/维度基数），基于真实结构回答，严禁用业务指标硬答；
 B 类 → 按决策树选：
    1) 语义层能表达（指标+维度+过滤都在 query_data 说明中）→ query_data 传 Plan JSON（口径有保障，优先）；
    2) 语义层表达不了（主数据统计/单价走势/占比计算/跨表计算）→ free_query 写 SELECT SQL（表必须带库名前缀，系统守门校验）；
    3) 不确定数据结构 → 先 explore_schema 再回来查询；
 C 类 → web_search 搜索，需要深入阅读时 fetch_url 抓取页面；
 D 类 → 直接回答，不调用工具。
+用户要求导出/下载明细数据时 → export_csv（SQL 守门同 free_query，结果写入服务器 exports/ 目录，回复中告知文件路径）。
 
 【第三步：查询规范】
 1. 一次规划：回答前想清楚需要哪几个查询，一次规划好再执行，不要查一步看一步；
@@ -67,186 +68,7 @@ D 类 → 直接回答，不调用工具。
 5. 信息足够后直接给出最终回复，不再调用工具；工具失败时换关键词/换来源/换写法再试，不要原样重试。"""
 
 
-# ---------------- 工具层 ----------------
-
-def web_search(query: str, max_results: int = 5) -> list[dict]:
-    """网页搜索（cn.bing.com），返回 [{title, url, snippet}]。"""
-    import html as html_mod
-    try:
-        import httpx
-        resp = httpx.get(
-            "https://cn.bing.com/search",
-            params={"q": query, "count": max_results},
-            timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                 "Chrome/124.0 Safari/537.36",
-                     "Accept-Language": "zh-CN,zh;q=0.9"},
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-        page = resp.text
-        results: list[dict] = []
-        for block in re.findall(r'<li class="b_algo"[\s\S]*?</li>', page)[:max_results]:
-            m = re.search(r'<h2><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a></h2>', block)
-            if not m:
-                continue
-            url, title = m.group(1), re.sub(r"<[^>]+>", "", m.group(2)).strip()
-            sm = re.search(r"<p[\s\S]*?>([\s\S]*?)</p>", block)
-            snippet = re.sub(r"<[^>]+>", "", sm.group(1)).strip() if sm else ""
-            results.append({"title": html_mod.unescape(title),
-                            "url": url,
-                            "snippet": html_mod.unescape(snippet)[:300]})
-        return results or {"error": "搜索无结果，建议换关键词"}
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"搜索失败: {e}"}
-
-
-def fetch_url(url: str) -> str:
-    """抓取网页并提取正文文本（截断）。"""
-    try:
-        import httpx
-        resp = httpx.get(url, timeout=20, follow_redirects=True,
-                         headers={"User-Agent": "Mozilla/5.0 (compatible; agent-pipeline/0.1)"})
-        resp.raise_for_status()
-        text = resp.text
-        text = re.sub(r"<script[\s\S]*?</script>", "", text)
-        text = re.sub(r"<style[\s\S]*?</style>", "", text)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text[:8000]
-    except Exception as e:  # noqa: BLE001
-        return f"抓取失败: {e}"
-
-
-def query_data(plan_json: str, draw: bool = True, chart_type: str = "auto") -> dict:
-    """受控数据查询：Plan JSON -> 语义层校验 -> SQL 编译 -> 只读执行。
-
-    Plan JSON 格式：
-    {"metric": "指标名", "dimensions": ["维度名"], "filters": [{"field": "字段", "op": "=", "value": "值"}], "time_macro": "时间宏"}
-    draw=False 时不生成图表（结构/单值/清单类问题用）。
-    chart_type 指定图表类型：bar/pie/line，auto 为系统自动判断。
-    """
-    from nlsql import run_plan
-    result = run_plan(plan_json)
-    if isinstance(result, dict):
-        result["draw"] = draw
-        result["chart_type"] = chart_type if chart_type in ("bar", "pie", "line") else "auto"
-    return result
-
-
-def explore_schema(database: str = "", table: str = "") -> dict:
-    """探索数据结构：查看三个业务库有哪些表、字段、行数。"""
-    from nlsql import explore_schema as _es
-    return _es(database, table)
-
-
-def free_query(sql: str, params_json: str = "[]", draw: bool = True, chart_type: str = "auto") -> dict:
-    """受控自由查询：直接写 SELECT SQL，系统守门（白名单/只读/限行/EXPLAIN）后执行。
-
-    draw=False 时不生成图表（结构/单值/清单类问题用）。
-    chart_type 指定图表类型：bar/pie/line，auto 为系统自动判断。
-    """
-    import json as _json
-    from nlsql import free_query as _fq
-    try:
-        params = _json.loads(params_json) if params_json else []
-    except _json.JSONDecodeError:
-        params = []
-    result = _fq(sql, params)
-    if isinstance(result, dict):
-        result["draw"] = draw
-        result["chart_type"] = chart_type if chart_type in ("bar", "pie", "line") else "auto"
-    return result
-
-
-TOOLS: dict[str, Callable] = {"web_search": web_search, "fetch_url": fetch_url, "query_data": query_data,
-                              "explore_schema": explore_schema, "free_query": free_query}
-
-TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "搜索互联网公开信息，返回标题、链接和摘要。用于获取新闻、资料、事实等外部信息。",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string", "description": "搜索关键词"}},
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": "抓取指定 URL 的网页正文文本。用于深入阅读搜索结果中的某个页面。",
-            "parameters": {
-                "type": "object",
-                "properties": {"url": {"type": "string", "description": "要抓取的网页地址"}},
-                "required": ["url"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_data",
-            "description": "查询业务数据库（销售订单/采购订单/库存，数据范围 2026-10-24 ~ 2026-11-23）。输入结构化 Plan JSON（不是 SQL），由系统校验后安全执行。可用指标：sales_amount(销售额)/sales_orders(订单数)/sales_qty(销售数量)/purchase_amount(采购额)/purchase_orders(采购订单数)/inventory_qty(库存量)。可用维度：customer_region(客户区域)/material(物料)/material_code(物料编码)/customer(客户)/order_date(日期)/supplier(供应商)/supplier_region(供应商区域)/warehouse(仓库)。可用过滤字段：sales 库 customer_region/material/material_code/customer/status；purchase 库 supplier/supplier_region/material/status；inventory 库 warehouse/material。可用时间宏：last_month/this_month/last_7_days/last_30_days/all。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "plan_json": {
-                        "type": "string",
-                        "description": "Plan JSON 字符串，格式：{\"metric\": \"sales_amount\", \"dimensions\": [\"customer_region\"], \"filters\": [{\"field\": \"customer_region\", \"op\": \"=\", \"value\": \"华南\"}], \"time_macro\": \"last_month\"}"
-                    },
-                    "draw": {
-                        "type": "boolean",
-                        "description": "是否生成图表。用户要看数据分布/趋势/占比/对比时为 true（默认）；查结构/字段/单值/清单类问题传 false"
-                    },
-                    "chart_type": {
-                        "type": "string",
-                        "enum": ["bar", "pie", "line", "auto"],
-                        "description": "图表类型。用户显式要求柱状图传 bar、饼图传 pie、折线图传 line；用户未指定图型时传 auto（系统自动判断）"
-                    }
-                },
-                "required": ["plan_json"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "explore_schema",
-            "description": "探索数据结构：查看业务库有哪些表、字段、类型、行数。当用户问『有什么数据/什么表/什么字段』或需要了解数据结构时使用。database 可选：bom_system/mdm_platform/sap_mock；不传返回全部表清单，传 database 返回该库各表字段，再传 table 返回单表字段。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "database": {"type": "string", "description": "库名：bom_system/mdm_platform/sap_mock，空则返回全部表清单"},
-                    "table": {"type": "string", "description": "表名，空则返回该库全部表的字段"}
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "free_query",
-            "description": "受控自由查询（长尾兜底）：当问题涉及的指标/维度不在 query_data 语义层中时使用。直接写 SELECT SQL（表必须带库名前缀，如 sap_mock.sap_sales_orders），系统守门校验（只读/白名单/限行/EXPLAIN）后执行。优先用 query_data，仅当语义层无法表达时才用本工具。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {"type": "string", "description": "SELECT 查询语句，表用 库名.表名 全限定，如 SELECT category, COUNT(*) AS cnt FROM mdm_platform.md_materials GROUP BY category"},
-                    "params_json": {"type": "string", "description": "参数化查询的参数 JSON 数组，与 SQL 中 %s 占位符对应，无参数传 []"},
-                    "draw": {"type": "boolean", "description": "是否生成图表。用户要看数据分布/趋势/占比/对比时为 true（默认）；查结构/字段/单值/清单类问题传 false"},
-                    "chart_type": {"type": "string", "enum": ["bar", "pie", "line", "auto"], "description": "图表类型。用户显式要求柱状图传 bar、饼图传 pie、折线图传 line；用户未指定图型时传 auto（系统自动判断）"}
-                },
-                "required": ["sql"],
-            },
-        },
-    },
-]
+from tools import TOOLS, TOOL_SCHEMAS
 
 
 def _client() -> OpenAI:
