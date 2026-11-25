@@ -121,7 +121,13 @@
   .trace a:hover { text-decoration: underline; }
   .chartbox { background: #fff; border: 1px solid var(--border); border-radius: 12px;
     padding: 12px; margin-top: 8px; box-shadow: var(--shadow); }
-  .chartbox .ctitle { color: #888; font-size: 12px; margin-bottom: 6px; }
+  .chartbox .chead { display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 6px; }
+  .chartbox .ctitle { color: #888; font-size: 12px; }
+  .chartbox .cbtns { display: flex; gap: 4px; }
+  .chartbox .cbtn { border: 1px solid var(--border-2); background: var(--panel); color: var(--text-sub);
+    border-radius: 5px; font-size: 11px; padding: 1px 8px; cursor: pointer; }
+  .chartbox .cbtn:hover, .chartbox .cbtn.on { color: var(--primary); border-color: var(--primary); }
   .chartbox .chart { width: 100%; height: 260px; }
   .chartbox table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 8px; }
   .chartbox th { background: #f7f8fc; color: #666; text-align: left; padding: 5px 8px;
@@ -334,15 +340,19 @@ function buildReportBox(rp) {
 function appendChartBox(turn, payload) {
   const box = document.createElement('div');
   box.className = 'chartbox';
+  const chead = document.createElement('div');
+  chead.className = 'chead';
   const st = document.createElement('div');
   st.className = 'ctitle';
   st.textContent = '数据报表（' + payload.row_count + ' 行 · 语义层 v' + payload.sem_ver + '）';
-  box.appendChild(st);
+  chead.appendChild(st);
+  box.appendChild(chead);
   const chartEl = document.createElement('div');
   chartEl.className = 'chart';
   box.appendChild(chartEl);
   turn.appendChild(box);
   try { renderChart(chartEl, payload); } catch (e) { chartEl.textContent = '图表渲染失败'; }
+  addChartActions(box, chartEl, payload);
   const tbl = document.createElement('table');
   const thead = document.createElement('tr');
   for (const c of payload.columns) {
@@ -783,6 +793,40 @@ function renderChart(el, payload) {
     };
   }
   chart.setOption(option);
+  return chart;
+}
+
+// ---------- 图表操作（下载/图型切换） ----------
+function addChartActions(box, chartEl, payload) {
+  const head = box.querySelector('.chead') || box;
+  let btns = head.querySelector('.cbtns');
+  if (btns) btns.remove();
+  btns = document.createElement('div');
+  btns.className = 'cbtns';
+  const dl = document.createElement('button');
+  dl.className = 'cbtn'; dl.textContent = '下载PNG';
+  dl.onclick = function () {
+    const inst = echarts.getInstanceByDom(chartEl);
+    if (!inst) return;
+    const a = document.createElement('a');
+    a.href = inst.getDataURL({type: 'png', pixelRatio: 2, backgroundColor: '#fff'});
+    a.download = 'chart.png'; a.click();
+  };
+  btns.appendChild(dl);
+  for (const t of ['bar', 'pie', 'line']) {
+    const b = document.createElement('button');
+    b.className = 'cbtn' + ((payload.chart_type || 'auto') === t ? ' on' : '');
+    b.textContent = t === 'bar' ? '柱状' : t === 'pie' ? '饼图' : '折线';
+    b.onclick = function () {
+      const inst = echarts.getInstanceByDom(chartEl);
+      if (inst) inst.dispose();
+      payload.chart_type = t;
+      renderChart(chartEl, payload);
+      addChartActions(box, chartEl, payload);
+    };
+    btns.appendChild(b);
+  }
+  head.appendChild(btns);
 }
 
 // ---------- 模式与事件绑定 ----------
