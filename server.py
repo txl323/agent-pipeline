@@ -471,6 +471,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             yield emit(event, payload)
 
         result = await task
+        # 计划收尾：工具调用轮次未必覆盖全部步骤，回复完成即计划完成，补发 100% 进度
+        if plan_id:
+            yield emit("plan_progress", {"step": plan_total, "total": plan_total, "progress": 100})
 
         # 证据入库 + 回复来源校验
         save_evidences(sid, result.get("evidences", []))
