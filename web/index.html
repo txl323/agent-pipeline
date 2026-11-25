@@ -234,6 +234,36 @@ function renderChat() {
   chat.scrollTop = chat.scrollHeight;
 }
 
+function buildReportBox(rp) {
+  const box = document.createElement('div');
+  box.className = 'chartbox reportbox';
+  const st = document.createElement('div');
+  st.className = 'ctitle';
+  st.textContent = '分析报告';
+  box.appendChild(st);
+  const concl = document.createElement('div');
+  concl.style.cssText = 'font-weight:600;margin:6px 0;';
+  concl.textContent = rp.conclusion || '';
+  box.appendChild(concl);
+  const sections = [['关键发现', 'findings'], ['数据证据', 'evidence'], ['风险与局限', 'risks'], ['建议', 'suggestions']];
+  for (const [title, key] of sections) {
+    const items = rp[key] || [];
+    if (!items.length) continue;
+    const h = document.createElement('div');
+    h.style.cssText = 'color:#888;font-size:12px;margin:8px 0 4px;';
+    h.textContent = title;
+    box.appendChild(h);
+    const ul = document.createElement('ul');
+    ul.style.cssText = 'margin:0;padding-left:18px;font-size:13px;';
+    for (const it of items) {
+      const li = document.createElement('li');
+      li.textContent = it;
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+  }
+  return box;
+}
 function appendChartBox(turn, payload) {
   const box = document.createElement('div');
   box.className = 'chartbox';
@@ -291,6 +321,7 @@ function appendMsgEl(m) {
     el.textContent = m.text;
     turn.appendChild(el);
     for (const cp of (m.charts || [])) appendChartBox(turn, cp);
+    if (m.report) turn.appendChild(buildReportBox(m.report));
   }
   chat.scrollTop = chat.scrollHeight;
 }
@@ -528,6 +559,10 @@ async function send() {
           lin.textContent = 'SQL: ' + payload.sql;
           box.appendChild(lin);
           chat.scrollTop = chat.scrollHeight;
+        } else if (eventName === 'report') {
+          const turn = lastTurn();
+          turn.appendChild(buildReportBox(payload));
+          chat.scrollTop = chat.scrollHeight;
         } else if (eventName === 'end') {
           statusEl.textContent = '完成 · ' + payload.steps + ' 步';
         }
@@ -678,14 +713,17 @@ async function loadConvMessages(conv) {
     conv.messages = data.messages.map(m => {
       if (m.role === 'user') return { kind: 'user', text: m.content };
       const content = m.content || '';
-      const text = content.split('<!--CHART:')[0].trim();
+      const text = content.split('<!--CHART:')[0].split('<!--REPORT:')[0].trim();
       const charts = [];
       const re = /<!--CHART:(.*?)-->/gs;
       let mm;
       while ((mm = re.exec(content))) {
         try { charts.push(JSON.parse(mm[1])); } catch (e) {}
       }
-      return { kind: 'ai', text, charts };
+      let report = null;
+      const rm = /<!--REPORT:(.*?)-->/s.exec(content);
+      if (rm) { try { report = JSON.parse(rm[1]); } catch (e) {} }
+      return { kind: 'ai', text, charts, report };
     });
     conv.loaded = true;
   } catch (e) {

@@ -346,9 +346,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
     mode = req.mode if req.mode in ("off", "standard", "deep") else "standard"
     data["messages"].append({"role": "user", "content": req.message})
-    # 送入模型的消息剥离图表标记，避免污染上下文
+    # 送入模型的消息剥离图表/报告标记，避免污染上下文
     messages = [
-        {"role": m["role"], "content": (m["content"] or "").split("<!--CHART:")[0].rstrip()}
+        {"role": m["role"], "content": (m["content"] or "").split("<!--CHART:")[0].split("<!--REPORT:")[0].rstrip()}
         for m in data["messages"]
     ]
 
@@ -381,15 +381,19 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         queue: asyncio.Queue = asyncio.Queue()
         # 图表持久化：捕获 chart 事件，随回复一起落库
         charts: list[dict] = []
+        # 报告持久化：捕获 report 事件，随回复一起落库
+        report: dict | None = None
 
         # 计划进度跟踪：按工具调用轮次估算进度
         plan_step = 0
         plan_total = len(plan["steps"]) if plan else 0
 
         def on_event(event: str, payload: dict) -> None:
-            nonlocal plan_step
+            nonlocal plan_step, report
             if event == "chart":
                 charts.append(payload)
+            elif event == "report":
+                report = payload
             if plan_id and event == "tool_start":
                 plan_step += 1
                 progress = min(100, int(plan_step / max(plan_total, 1) * 100))
@@ -429,6 +433,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         # 落库去重：只保留最后一个图表（重绘/美化迭代的中间图无保留价值）
         for cp in charts[-1:]:
             reply_content += "\n<!--CHART:" + json.dumps(cp, ensure_ascii=False) + "-->"
+        if report:
+            reply_content += "\n<!--REPORT:" + json.dumps(report, ensure_ascii=False) + "-->"
         data["messages"].append({"role": "assistant", "content": reply_content})
         # 上下文压缩：按字符量触发，LLM 摘要保留关键事实
         data["messages"] = _maybe_compress(data["messages"])

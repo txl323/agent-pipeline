@@ -382,6 +382,34 @@ def _verify_check(client, model, messages: list[dict]) -> str | None:
         return None
 
 
+_REPORT_SYSTEM = """你是数据分析报告撰写员。把最终回复重组为结构化报告 JSON，字段：
+{"conclusion": "一句话结论", "findings": ["关键发现", ...], "evidence": ["数据证据（含具体数字）", ...], "risks": ["风险或局限", ...], "suggestions": ["建议", ...]}
+只输出 JSON，不要任何其他内容。findings/evidence/risks/suggestions 各 2-4 条，内容必须来自回复原文，严禁编造数字。"""
+
+
+def _generate_report(client, model, reply: str) -> dict | None:
+    """报告生成层：把最终回复重组为结构化报告。失败返回 None（不影响主流程）。"""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": _REPORT_SYSTEM},
+                      {"role": "user", "content": reply}],
+            temperature=0.1,
+            max_tokens=600,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        fence = chr(96) * 3
+        if text.startswith(fence):
+            text = text.split("\n", 1)[1] if "\n" in text else text
+            text = text.rsplit(fence, 1)[0]
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("conclusion"):
+            return data
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_agent_stream(messages: list[dict], mode: str = "standard",
                      on_event: Callable | None = None) -> dict:
     """流式执行 Agent 循环。
@@ -453,7 +481,13 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     messages.append({"role": "user",
                                      "content": f"（验证环节：已有数据不足以完整回答，原因：{verdict}。请继续调用工具补充查询，然后给出最终回复。）"})
                     continue
-            return {"reply": content_acc, "steps": step, "evidences": evidences, "trace": trace}
+            # 报告生成层：数据查询类问题生成结构化报告
+            report = None
+            if mode != "off" and any(t.get("tool") in ("query_data", "free_query") for t in trace):
+                report = _generate_report(client, model, content_acc)
+                if report:
+                    emit("report", report)
+            return {"reply": content_acc, "steps": step, "evidences": evidences, "trace": trace, "report": report}
 
         # 记录 assistant 工具调用消息（reasoning 不回传）
         messages.append({
