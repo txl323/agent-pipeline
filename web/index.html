@@ -560,7 +560,7 @@ async function send() {
             num.className = 'num';
             num.textContent = i + 1;
             const goal = document.createElement('span');
-            goal.textContent = s.goal;
+            goal.textContent = s.goal || s;
             row.appendChild(num); row.appendChild(goal);
             inner.appendChild(row);
           });
