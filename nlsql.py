@@ -421,3 +421,63 @@ def free_query(sql: str, params: list | None = None) -> dict:
         return {"ok": False, "error": f"执行失败: {e}"}
     result.update({"ok": True, "sql": sql, "params": params, "sem_ver": semantic_version()})
     return result
+
+
+# ---------------- 表统计速查 ----------------
+
+_TABLE_STATS_MAX_COLS = 20
+
+
+def table_stats(database: str, table: str) -> dict:
+    """表统计速查：行数、时间范围、维度基数，辅助口径判断。
+
+    返回 {ok, database, table, row_count, time_range: {min, max}, cardinality: {列名: 去重数}}
+    自动识别日期/时间类型列取时间范围；对低基数文本列（去重数<=50）统计基数。
+    """
+    if database not in ALLOWED_DATABASES:
+        return {"ok": False, "error": f"库不在白名单: {database}，可选: {list(ALLOWED_DATABASES)}"}
+    try:
+        with _db("information_schema") as c:
+            with c.cursor() as cur:
+                cur.execute(
+                    "SELECT column_name, data_type FROM columns "
+                    "WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position",
+                    (database, table),
+                )
+                cols = cur.fetchall()
+        if not cols:
+            return {"ok": False, "error": f"表不存在: {database}.{table}"}
+        col_names = [r[0] for r in cols]
+        date_cols = [r[0] for r in cols if r[1] in ("date", "datetime", "timestamp")]
+        text_cols = [r[0] for r in cols if r[1] in ("char", "varchar")][:_TABLE_STATS_MAX_COLS]
+
+        with _db(database) as c, c.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{database}`.`{table}`")
+            row_count = cur.fetchone()[0]
+
+            time_range = None
+            if date_cols:
+                dc = date_cols[0]
+                cur.execute(
+                    f"SELECT MIN(`{dc}`), MAX(`{dc}`) FROM `{database}`.`{table}`"
+                )
+                mn, mx = cur.fetchone()
+                if mn is not None:
+                    time_range = {"column": dc,
+                                  "min": mn.isoformat() if hasattr(mn, "isoformat") else str(mn),
+                                  "max": mx.isoformat() if hasattr(mx, "isoformat") else str(mx)}
+
+            cardinality = {}
+            for tc in text_cols:
+                cur.execute(
+                    f"SELECT COUNT(DISTINCT `{tc}`) FROM `{database}`.`{table}`"
+                )
+                n = cur.fetchone()[0]
+                if n <= 50:
+                    cardinality[tc] = n
+
+        return {"ok": True, "database": database, "table": table,
+                "row_count": row_count, "time_range": time_range,
+                "cardinality": cardinality}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"统计失败: {e}"}

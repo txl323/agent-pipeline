@@ -360,11 +360,11 @@ async def run_sql(req: ChatRequest) -> dict:
 
     message 字段传 SQL 语句；session_id 可选（用于落库留痕）。
     """
-    from nlsql import free_query
+    from tools.dbtools import free_query
     sql = (req.message or "").strip()
     if not sql:
         raise HTTPException(400, "SQL 为空")
-    result = free_query(sql, [])
+    result = free_query(sql, "[]")
     if req.session_id:
         try:
             save_messages(req.session_id, [
