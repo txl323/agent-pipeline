@@ -367,7 +367,8 @@ def _compress_tool_result(tool: str, result) -> str:
 VERIFY_MAX_ROUNDS = 2  # 验证回环上限，防止死循环
 _VERIFY_SYSTEM = """你是数据分析验证员。根据对话历史判断已有数据是否足以回答用户最后的问题：
 - 数据充分、能直接回答 -> 只回复 PASS
-- 数据不足/数值明显异常/缺少关键维度或时间范围 -> 用一句话说明缺什么、需要补充什么查询（不要调用工具，不要展开分析）"""
+- 数据不足/数值明显异常/缺少关键维度或时间范围 -> 用一句话说明缺什么、需要补充什么查询（不要调用工具，不要展开分析）
+- 执行计划与实际情况不符（如计划要环比但数据只有一期、计划维度不存在、计划步骤不可行）-> 以 REPLAN: 开头，一句话说明原计划哪步不可行及原因，并给出调整后的做法"""
 
 
 def _verify_check(client, model, messages: list[dict]) -> str | None:
@@ -524,10 +525,19 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 verdict = _verify_check(client, model, messages)
                 if verdict:
                     verify_rounds += 1
-                    trace.append({"round": step, "tool": "verify",
-                                  "query": "数据不足：" + verdict[:120], "urls": []})
-                    messages.append({"role": "user",
-                                     "content": f"（验证环节：已有数据不足以完整回答，原因：{verdict}。请继续调用工具补充查询，然后给出最终回复。）"})
+                    if verdict.startswith("REPLAN:"):
+                        # replan 钩子：计划偏差，注入调整指令
+                        adjust = verdict[len("REPLAN:"):].strip()
+                        trace.append({"round": step, "tool": "replan",
+                                      "query": "计划调整：" + adjust[:120], "urls": []})
+                        emit("replan", {"reason": adjust[:200]})
+                        messages.append({"role": "user",
+                                         "content": f"（计划调整：原计划部分步骤不可行，{adjust}。请按调整后的做法继续执行，完成剩余步骤后给出最终回复。）"})
+                    else:
+                        trace.append({"round": step, "tool": "verify",
+                                      "query": "数据不足：" + verdict[:120], "urls": []})
+                        messages.append({"role": "user",
+                                         "content": f"（验证环节：已有数据不足以完整回答，原因：{verdict}。请继续调用工具补充查询，然后给出最终回复。）"})
                     continue
             # 报告生成层：数据查询类问题生成结构化报告
             report = None
