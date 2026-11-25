@@ -51,7 +51,7 @@ D 类 → 直接回答，不调用工具。
 3. 用户没提 → 分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类或辅助统计查询 draw=false；
 4. 中间步骤/辅助性查询一律 draw=false，只有最终呈现给用户的结果才画图；
 5. 结果只有一行时系统不生成图表，你必须向用户解释原因并建议可画图的替代问法（各区域对比/按物料分布/按日期趋势）；
-6. 用户显式指定图型时传对应 chart_type（柱状图→bar、饼图→pie、折线图→line），未指定传 auto；用户显式指定的图型优先渲染；若系统检测到图型与数据形态明显冲突，会在回复末尾收到询问提示——照实询问用户保持还是切换，由用户决定，不要自行切换；
+6. 用户显式指定图型时传对应 chart_type（柱状图→bar、饼图→pie、折线图→line），未指定传 auto；图型与数据形态适配时直接画图；若系统检测到明显冲突，本次不会出图且会收到询问提示——先询问用户保持还是切换，待用户明确选择后再按所选图型重新查询并画图；
 7. 重绘/美化/调整图表类请求：只执行一次最终查询并画图（draw=true），中间尝试性查询一律 draw=false，严禁一轮回答产生多个图表。
 
 【第五步：回答规范】
@@ -427,13 +427,19 @@ def _decide_chart_type(columns: list, rows: list, row_count: int, preferred: str
     else:
         fit = "bar"
     if preferred in ("bar", "pie", "line"):
-        if preferred == fit:
+        # 仅当指定图型明显不适配数据形态才算冲突（bar 几乎万能，不冲突）
+        conflict = False
+        if preferred == "pie" and (n > 8 or has_time):
+            conflict = True
+        if preferred == "line" and not has_time and n > 8:
+            conflict = True
+        if not conflict:
             return preferred, None
         names = {"bar": "柱状图", "pie": "饼图", "line": "折线图"}
-        note = (f"已按用户要求渲染{names[preferred]}，但数据形态（{n}行"
-                f"{'、含时间列' if has_time else ''}）更适合{names[fit]}。"
-                f"请在最终回复末尾用一句话询问用户：保持{names[preferred]}还是切换为{names[fit]}？"
-                "在用户明确选择前不要自行切换图型。")
+        note = (f"用户要求{names[preferred]}，但数据形态（{n}行"
+                f"{'、含时间列' if has_time else ''}）更适合{names[fit]}，两者冲突。"
+                f"本次先不要画图，请在回复中询问用户：保持{names[preferred]}还是切换为{names[fit]}？"
+                f"待用户明确选择后，再按所选图型重新查询并画图。")
         return preferred, note
     return fit, None
 
@@ -557,18 +563,20 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                         result.get("row_count", 0),
                         result.get("chart_type", "auto"),
                     )
-                    emit("chart", {
-                    "columns": result.get("columns", []),
-                    "rows": result.get("rows", [])[:100],
-                    "row_count": result.get("row_count", 0),
-                    "sql": result.get("sql", ""),
-                    "params": result.get("params", []),
-                    "sem_ver": result.get("sem_ver", ""),
-                    "plan_json": str(args.get("plan_json", "")),
-                    "chart_type": ctype,
-                })
                     if hint:
+                        # 图型与数据形态冲突：先不出图，询问用户后再画
                         chart_hints.append(hint)
+                    else:
+                        emit("chart", {
+                        "columns": result.get("columns", []),
+                        "rows": result.get("rows", [])[:100],
+                        "row_count": result.get("row_count", 0),
+                        "sql": result.get("sql", ""),
+                        "params": result.get("params", []),
+                        "sem_ver": result.get("sem_ver", ""),
+                        "plan_json": str(args.get("plan_json", "")),
+                        "chart_type": ctype,
+                    })
             # 执行轨迹：记录本轮调用的工具与查阅的网页
             t_urls: list[str] = []
             if name == "web_search" and isinstance(result, list):
