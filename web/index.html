@@ -91,6 +91,13 @@
             line-height: 1.75; white-space: pre-wrap; word-break: break-word;
             box-shadow: var(--shadow); }
   .msg-ai.empty { display: none; }
+  .ai-block { position: relative; }
+  .ai-actions { display: flex; gap: 6px; margin-top: 6px; opacity: 0;
+                transition: opacity .15s; }
+  .ai-block:hover .ai-actions { opacity: 1; }
+  .ai-act { border: 1px solid var(--border-2); background: var(--panel); color: var(--text-sub);
+            border-radius: 6px; font-size: 11.5px; padding: 2px 10px; cursor: pointer; }
+  .ai-act:hover { color: var(--primary); border-color: var(--primary); }
   .sources { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
              padding: 10px 14px; margin-top: 8px; font-size: 12.5px; box-shadow: var(--shadow); }
   .sources .stitle { color: var(--text-dim); margin-bottom: 6px; }
@@ -148,12 +155,13 @@
   .mode-btn { border: 1px solid var(--border-2); background: var(--panel); border-radius: 16px;
               padding: 4px 14px; font-size: 12.5px; cursor: pointer; color: var(--text-sub); }
   .mode-btn.active { background: var(--primary); border-color: var(--primary); color: #fff; }
-  .inputrow { display: flex; gap: 10px; background: var(--panel); border: 1px solid var(--border-2);
-              border-radius: 14px; padding: 8px; box-shadow: var(--shadow); }
+  .inputrow { display: flex; gap: 10px; align-items: flex-end; background: var(--panel);
+              border: 1px solid var(--border-2); border-radius: 14px; padding: 8px;
+              box-shadow: var(--shadow); }
   .inputrow:focus-within { border-color: var(--primary); }
   #input { flex: 1; border: none; outline: none; resize: none; font-size: 14px;
-          font-family: inherit; height: 40px; line-height: 40px; padding: 0 8px;
-          background: transparent; color: var(--text); }
+          font-family: inherit; min-height: 40px; max-height: 160px; line-height: 1.5;
+          padding: 9px 8px; background: transparent; color: var(--text); overflow-y: auto; }
   #send { background: var(--primary); color: #fff; border: none; border-radius: 10px;
           padding: 0 20px; font-size: 14px; cursor: pointer; transition: background .15s; }
   #send:disabled { background: #aab6f5; cursor: not-allowed; }
@@ -373,7 +381,7 @@ function appendMsgEl(m) {
     const el = document.createElement('div');
     el.className = 'msg-ai';
     renderMarkdown(el, m.text);
-    turn.appendChild(el);
+    turn.appendChild(buildAIBlock(el, m));
     for (const cp of (m.charts || [])) appendChartBox(turn, cp);
     if (m.report) turn.appendChild(buildReportBox(m.report));
   }
@@ -388,6 +396,51 @@ function lastTurn() {
     chat.appendChild(t);
   }
   return t;
+}
+
+// ---------- AI 消息操作（复制/重新生成） ----------
+function buildAIBlock(el, m) {
+  const block = document.createElement('div');
+  block.className = 'ai-block';
+  block.appendChild(el);
+  const acts = document.createElement('div');
+  acts.className = 'ai-actions';
+  const cp = document.createElement('button');
+  cp.className = 'ai-act'; cp.textContent = '复制';
+  cp.onclick = function () {
+    const t = m.text || el.textContent || '';
+    const done = () => { cp.textContent = '已复制'; setTimeout(() => cp.textContent = '复制', 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(done).catch(() => fallbackCopy(t, done));
+    } else fallbackCopy(t, done);
+  };
+  acts.appendChild(cp);
+  const rg = document.createElement('button');
+  rg.className = 'ai-act'; rg.textContent = '重新生成';
+  rg.onclick = function () { regenerate(m); };
+  acts.appendChild(rg);
+  block.appendChild(acts);
+  return block;
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) {}
+  document.body.removeChild(ta);
+}
+function regenerate(m) {
+  if (busy) return;
+  const c = activeConv();
+  const idx = c.messages.indexOf(m);
+  if (idx < 0) return;
+  let ui = idx - 1;
+  while (ui >= 0 && c.messages[ui].kind !== 'user') ui--;
+  if (ui < 0) return;
+  const text = c.messages[ui].text;
+  c.messages = c.messages.slice(0, ui);
+  renderChat();
+  input.value = text;
+  send();
 }
 
 // ---------- 发送与流式 ----------
@@ -427,7 +480,7 @@ function ensureAI() {
   const turn = lastTurn();
   const el = document.createElement('div');
   el.className = 'msg-ai';
-  turn.appendChild(el);
+  turn.appendChild(buildAIBlock(el, m));
   return { m, el };
 }
 
@@ -740,6 +793,10 @@ document.getElementById('newchat').addEventListener('click', () => {
 sendBtn.addEventListener('click', send);
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 160) + 'px';
 });
 
 // ---------- 服务端会话恢复 ----------
