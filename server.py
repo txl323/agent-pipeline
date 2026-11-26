@@ -35,6 +35,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     mode: str = "standard"  # off / standard / deep
     user_regions: list[str] | None = None  # 区域权限（服务端注入，None 不受限）
+    auto_approve_readonly: bool = False  # 只读免确认开关（前端切换，开启时确认门直接放行）
 
 
 class ConfirmRequest(BaseModel):
@@ -491,7 +492,10 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
         def confirm_handler(payload: dict) -> bool:
-            """确认门回调（工作线程内同步阻塞）：推 confirm_request 事件，等 /api/confirm 应答。"""
+            """确认门回调（工作线程内同步阻塞）：推 confirm_request 事件，等 /api/confirm 应答。
+            只读免确认开关开启时直接放行（守门不变，仅跳过重复确认）。"""
+            if req.auto_approve_readonly:
+                return True
             cid = uuid.uuid4().hex[:12]
             ev = threading.Event()
             _PENDING_CONFIRMS[cid] = {"event": ev, "approved": False}

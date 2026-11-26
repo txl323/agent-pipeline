@@ -199,6 +199,7 @@
         <button class="mode-btn" data-mode="off">直接回答</button>
         <button class="mode-btn active" data-mode="standard">标准思考</button>
         <button class="mode-btn" data-mode="deep">深度思考</button>
+        <button class="mode-btn" id="roToggle" title="开启后本会话只读查询不再逐次确认，直接放行（守门规则不变）">只读免确认：关</button>
       </div>
       <div class="inputrow">
         <textarea id="input" placeholder="输入任务或问题，回车发送（Shift+回车换行）"></textarea>
@@ -227,6 +228,18 @@ const convList = document.getElementById('convlist');
 const convTitle = document.getElementById('convTitle');
 
 let mode = localStorage.getItem('agent_mode') || 'standard';
+let roAuto = localStorage.getItem('agent_ro_auto') === '1';
+const roToggle = document.getElementById('roToggle');
+function renderRoToggle() {
+  roToggle.classList.toggle('active', roAuto);
+  roToggle.textContent = '只读免确认：' + (roAuto ? '开' : '关');
+}
+roToggle.addEventListener('click', () => {
+  roAuto = !roAuto;
+  try { localStorage.setItem('agent_ro_auto', roAuto ? '1' : '0'); } catch (e) {}
+  renderRoToggle();
+});
+renderRoToggle();
 let busy = false;
 
 // ---------- 会话数据模型（localStorage 持久化） ----------
@@ -522,7 +535,7 @@ async function send() {
     const resp = await fetch('api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({session_id: c.sid, message: text, mode}),
+      body: JSON.stringify({session_id: c.sid, message: text, mode, auto_approve_readonly: roAuto}),
     });
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
