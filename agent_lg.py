@@ -190,6 +190,8 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     _patch_tool_schemas(tools)
     # 已加载技能集合（门禁：未加载技能的底层工具拒绝执行）
     loaded_skills: set[str] = set()
+    # 图表候选（统一出图：工具执行只暂存，验证通过/流程收尾后只发最后一张）
+    chart_candidate: list[dict] = []
 
     skill_list = "\n".join(f"- {sk.name}: {sk.description}" for sk in skills.values())
     system_text = SYSTEM_PROMPT.replace("{skill_list}", skill_list).replace("{skill_memory}", sr.memory_context())
@@ -307,14 +309,19 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                         result = {"ok": False, "error": f"执行失败: {e}"}
             preview = json.dumps(result, ensure_ascii=False)[:200] if not isinstance(result, str) else result[:200]
             emit("tool_end", {"tool": fname, "preview": preview})
-            # 图表事件：查询成功且非单行且 draw 时推送（与原版协议一致）
+            # 图表候选：查询成功且非单行且 draw 时暂存（不立即推送，避免被后续图替换导致忽快忽慢）
             if (fname in ("query_data", "free_query") and isinstance(result, dict)
                     and result.get("ok") and result.get("draw", True)
                     and result.get("row_count", 0) > 1):
-                emit("chart", {
+                rc = result.get("row_count", 0)
+                chart_candidate.clear()  # 重绘/多轮查询只保留最后一张
+                chart_candidate.append({
                     "columns": result.get("columns", []),
                     "rows": result.get("rows", [])[:100],
-                    "row_count": result.get("row_count", 0),
+                    "row_count": rc,
+                    "top_n": min(100, rc),
+                    "total_count": rc,
+                    "truncated": rc > 100,
                     "sql": result.get("sql", ""),
                     "sem_ver": result.get("sem_ver", ""),
                     "chart_type": result.get("chart_type", "auto"),
@@ -393,6 +400,9 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 break
         break
 
+    # 统一出图：验证通过/流程收尾后推送最终唯一一张图（候选被后续图替换时只保留最后一张）
+    if chart_candidate:
+        emit("chart", chart_candidate[-1])
     return {"reply": final_state["final_reply"], "steps": final_state["steps"],
             "evidences": final_state["evidences"], "trace": final_state["trace"], "report": None}
 

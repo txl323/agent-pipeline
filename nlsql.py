@@ -204,9 +204,13 @@ def compile_sql(plan: dict, allowed_regions: list[str] | None = None) -> tuple[s
     if where:
         sql += " WHERE " + " AND ".join(where)
     if group_cols:
-        # 分组查询：降序便于图表展示，LIMIT 收紧（图表场景足够）
+        # 分组查询：LIMIT 收紧（图表场景足够）
         sql += " GROUP BY " + ", ".join(group_cols)
-        sql += " ORDER BY value DESC LIMIT 1000"
+        # 时间维度强制升序（趋势图正确时间轴），其余按指标降序
+        if "order_date" in (plan.get("dimensions") or []):
+            sql += " ORDER BY order_date ASC LIMIT 1000"
+        else:
+            sql += " ORDER BY value DESC LIMIT 1000"
     # 无分组：单值查询，不需要 ORDER BY/LIMIT
     return sql, params, ds
 
