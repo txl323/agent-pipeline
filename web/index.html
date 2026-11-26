@@ -190,7 +190,7 @@
 <div id="main">
   <header>
     <span class="title" id="convTitle">新对话</span>
-    <div class="hright"><span id="status">就绪</span><button id="themeToggle" title="切换深色/浅色主题">🌙</button></div>
+    <div class="hright"><span id="status">就绪</span><button id="roToggle" class="mode-btn" style="font-size:12px;padding:3px 10px;" title="开启后本会话只读查询不再逐次确认，直接放行（守门规则不变）">只读免确认：关</button><button id="themeToggle" title="切换深色/浅色主题">🌙</button></div>
   </header>
   <div id="chat"></div>
   <div id="inputbar">
@@ -199,7 +199,6 @@
         <button class="mode-btn" data-mode="off">直接回答</button>
         <button class="mode-btn active" data-mode="standard">标准思考</button>
         <button class="mode-btn" data-mode="deep">深度思考</button>
-        <button class="mode-btn" id="roToggle" title="开启后本会话只读查询不再逐次确认，直接放行（守门规则不变）">只读免确认：关</button>
       </div>
       <div class="inputrow">
         <textarea id="input" placeholder="输入任务或问题，回车发送（Shift+回车换行）"></textarea>
@@ -274,7 +273,7 @@ function delConv(id, ev) {
   renderChat();
   // 同步删除服务端会话（含消息/证据/计划），避免刷新后复现
   if (target && target.sid) {
-    fetch('/agent/api/conversations/' + target.sid, { method: 'DELETE' })
+    fetch('api/conversations/' + target.sid, { method: 'DELETE' })
       .catch(() => {});
   }
 }
@@ -884,11 +883,11 @@ function addChartActions(box, chartEl, payload) {
 
 // ---------- 模式与事件绑定 ----------
 function syncModeBtns() {
-  document.querySelectorAll('.mode-btn').forEach(b =>
+  document.querySelectorAll('.mode-btn[data-mode]').forEach(b =>
     b.classList.toggle('active', b.dataset.mode === mode));
 }
 syncModeBtns();
-document.querySelectorAll('.mode-btn').forEach(b =>
+document.querySelectorAll('.mode-btn[data-mode]').forEach(b =>
   b.addEventListener('click', () => {
     mode = b.dataset.mode;
     localStorage.setItem('agent_mode', mode);
