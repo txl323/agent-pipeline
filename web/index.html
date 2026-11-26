@@ -582,6 +582,12 @@ async function send() {
             const fill = planEl.querySelector('.fill');
             if (fill) fill.style.width = payload.progress + '%';
           }
+        } else if (eventName === 'status') {
+          if (!curThinking) curThinking = ensurePanel('thinking');
+          curThinking.m.text += payload.text + '\n';
+          curThinking.body.textContent += payload.text + '\n';
+          curThinking.body.scrollTop = curThinking.body.scrollHeight;
+          statusEl.textContent = '处理中…';
         } else if (eventName === 'thinking') {
           if (!curThinking) curThinking = ensurePanel('thinking');
           curThinking.m.text += payload.text;

@@ -265,7 +265,7 @@ def execute_readonly(sql: str, params: list, ds: str) -> dict:
 
 # ---------------- 主入口：Plan JSON -> 结果 ----------------
 
-def run_plan(plan_json: str, allowed_regions: list[str] | None = None) -> dict:
+def run_plan(plan_json: str, allowed_regions: list[str] | None = None, sid: str = "") -> dict:
     """LLM 工具入口：Plan JSON 字符串 -> 受控执行结果。
 
     返回 {ok, error, sql, params, sem_ver, columns, rows, row_count, elapsed_ms, artifact_id}
@@ -289,10 +289,69 @@ def run_plan(plan_json: str, allowed_regions: list[str] | None = None) -> dict:
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"执行失败: {e}"}
     result.update({"ok": True, "sql": sql, "params": params, "sem_ver": semantic_version()})
+    try:
+        result["stats"] = _stats_summary(result.get("columns", []), result.get("rows", []))
+        result["artifact_ref"] = save_result(result, sid)
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
 # ---------------- 可追溯：artifact 落库 ----------------
+
+# ---------------- 统计摘要 + 完整结果 artifact ----------------
+def _stats_summary(columns: list, rows: list) -> dict:
+    """代码计算统计摘要：最高/最低/总量/行数/是否截断。数字来自 SQL 结果，非 LLM 生成。"""
+    if not rows or not columns:
+        return {"row_count": len(rows), "truncated": False}
+    num_idx = [i for i, r in enumerate(rows[0]) if isinstance(r, (int, float)) and not isinstance(r, bool)]
+    if not num_idx:
+        return {"row_count": len(rows), "truncated": len(rows) >= 1000}
+    mi = num_idx[-1] if len(num_idx) > 1 else num_idx[0]
+    vals = [(r[mi], r) for r in rows if isinstance(r[mi], (int, float))]
+    if not vals:
+        return {"row_count": len(rows), "truncated": len(rows) >= 1000}
+    hi = max(vals, key=lambda x: x[0])
+    lo = min(vals, key=lambda x: x[0])
+    return {
+        "metric_col": columns[mi],
+        "max": {"value": hi[0], "row": list(hi[1])},
+        "min": {"value": lo[0], "row": list(lo[1])},
+        "total": round(sum(v for v, _ in vals), 2),
+        "row_count": len(rows),
+        "truncated": len(rows) >= 1000,
+    }
+
+
+def save_result(result: dict, sid: str = "") -> str:
+    """完整查询结果落 result_store 表，返回 ref（供追问复用，不重查库）。"""
+    ref = str(uuid.uuid4())
+    with _db("agent_pipeline") as c, c.cursor() as cur:
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS result_store ("
+            "id INT AUTO_INCREMENT PRIMARY KEY, ref VARCHAR(64) NOT NULL UNIQUE, "
+            "sid VARCHAR(64), result_json MEDIUMTEXT, row_count INT, "
+            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, INDEX idx_ref (ref))"
+        )
+        cur.execute(
+            "INSERT INTO result_store (ref, sid, result_json, row_count) VALUES (%s,%s,%s,%s)",
+            (ref, sid, json.dumps(result, ensure_ascii=False), result.get("row_count", 0)),
+        )
+    return ref
+
+
+def load_result(ref: str) -> dict:
+    """按 ref 取回完整结果（追问复用，不重查库）。"""
+    with _db("agent_pipeline") as c, c.cursor() as cur:
+        cur.execute("SELECT result_json FROM result_store WHERE ref=%s", (ref,))
+        row = cur.fetchone()
+    if not row:
+        return {"ok": False, "error": f"artifact 不存在: {ref}"}
+    try:
+        return json.loads(row[0])
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"artifact 解析失败: {e}"}
+
 
 def save_artifact(plan: dict, sql: str, params: list, result: dict, sid: str) -> str:
     """执行快照落 trace_artifact 表，返回 ref（UUID）。"""
@@ -383,7 +442,8 @@ _FORBIDDEN_SQL = re.compile(
 )
 
 
-def free_query(sql: str, params: list | None = None) -> dict:
+def free_query(sql: str, params: list | None = None,
+              allowed_regions: list[str] | None = None, sid: str = "") -> dict:
     """长尾查询兜底：LLM 直接生成 SQL，代码守门后执行。
 
     守门规则：
@@ -392,6 +452,9 @@ def free_query(sql: str, params: list | None = None) -> dict:
     - 强制 LIMIT（无 LIMIT 自动加 1000，上限 10000）
     - EXPLAIN 护栏（扫描行数超阈值拦截）
     """
+    if allowed_regions is not None:
+        return {"ok": False,
+                "error": "权限不足：当前用户受区域权限限制，free_query 已禁用。请使用 query_data（语义层查询，区域权限自动下推到 WHERE）"}
     params = params or []
     sql = (sql or "").strip().rstrip(";")
     if not sql:
@@ -429,6 +492,11 @@ def free_query(sql: str, params: list | None = None) -> dict:
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"执行失败: {e}"}
     result.update({"ok": True, "sql": sql, "params": params, "sem_ver": semantic_version()})
+    try:
+        result["stats"] = _stats_summary(result.get("columns", []), result.get("rows", []))
+        result["artifact_ref"] = save_result(result, sid)
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 

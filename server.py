@@ -33,6 +33,7 @@ class ChatRequest(BaseModel):
     session_id: str = ""
     message: str = Field(..., min_length=1)
     mode: str = "standard"  # off / standard / deep
+    user_regions: list[str] | None = None  # 区域权限（服务端注入，None 不受限）
 
 
 # ---------------- MySQL 访问层 ----------------
@@ -364,6 +365,9 @@ async def run_sql(req: ChatRequest) -> dict:
     sql = (req.message or "").strip()
     if not sql:
         raise HTTPException(400, "SQL 为空")
+    # 区域权限：受限用户禁用 SQL 直执行（防止绕过语义层下推）
+    if req.user_regions:
+        raise HTTPException(403, "权限不足：当前用户受区域权限限制，SQL 直执行已禁用")
     result = free_query(sql, "[]")
     if req.session_id:
         try:
@@ -387,6 +391,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         data = load_session(sid)
 
     mode = req.mode if req.mode in ("off", "standard", "deep") else "standard"
+    user_regions = req.user_regions  # 区域权限（服务端注入，None 不受限）
     data["messages"].append({"role": "user", "content": req.message})
     # 送入模型的消息剥离图表/报告标记，避免污染上下文
     messages = [
@@ -459,7 +464,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
         def run_sync() -> dict:
-            return run_agent_stream(messages, mode=mode, on_event=on_event, plan=plan)
+            return run_agent_stream(messages, mode=mode, on_event=on_event, plan=plan,
+                                    sid=sid, user_regions=user_regions)
 
         task = loop.run_in_executor(None, run_sync)
 

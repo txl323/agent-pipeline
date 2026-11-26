@@ -131,8 +131,20 @@ def _compress_tool_result(tool: str, result) -> str:
             chart_note = "结果已自动以图表报表形式展示给用户。回复默认不重复输出数据明细，只写3-5句关键结论与解读。"
         else:
             chart_note = "本次查询未生成图表（draw=false），请用文字清晰回答。"
+        stats = result.get("stats") or {}
+        stats_line = ""
+        if stats.get("metric_col"):
+            mx, mn = stats.get("max", {}), stats.get("min", {})
+            stats_line = (f"\n统计摘要（代码计算，可信）: 指标列={stats.get('metric_col')}，"
+                          f"最高={mx.get('value')}（行={mx.get('row')}），"
+                          f"最低={mn.get('value')}（行={mn.get('row')}），"
+                          f"总量={stats.get('total')}，行数={stats.get('row_count')}，"
+                          f"{'结果已截断（LIMIT），分析仅基于已返回行' if stats.get('truncated') else '未截断'}")
+        ref = result.get("artifact_ref") or ""
+        ref_line = f"\n完整结果已存 artifact（ref={ref}），追问细节时引用此 ref，不要重查库" if ref else ""
         return (f"查询成功，共 {result.get('row_count', len(rows))} 行\n"
-                f"列: {cols}\n前3行摘要: {top}\nSQL: {result.get('sql', '')}\n{chart_note}")
+                f"列: {cols}\n前3行摘要: {top}\nSQL: {result.get('sql', '')}\n{chart_note}"
+                f"{stats_line}{ref_line}\n注意：分析结论中的数字必须使用统计摘要与前3行中的真实数字，严禁编造或外推未返回的行。")
     if tool == "web_search" and isinstance(result, list):
         lines = []
         for r in result[:6]:
@@ -157,8 +169,11 @@ def _collect_evidence(tool: str, args: dict, result, evidences: list) -> None:
 
 def run_agent_stream(messages: list[dict], mode: str = "standard",
                       on_event: Callable[[str, dict], None] = lambda e, d: None,
-                      plan: dict | None = None, sid: str = "") -> dict:
-    """LangGraph 主入口：与原版 run_agent_stream 签名/返回兼容。"""
+                      plan: dict | None = None, sid: str = "",
+                      user_regions: list[str] | None = None) -> dict:
+    """LangGraph 主入口：与原版 run_agent_stream 签名/返回兼容。
+    user_regions：区域权限（服务端注入，None 不受限），经 _ctx 下传数据服务，不进 LLM schema。
+    """
     emit = on_event
     skills = sr.load_skills()
     sr.init_memory()
@@ -205,7 +220,6 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 emit("thinking", {"text": rc})
             if chunk.content:
                 buffer += chunk.content
-                emit("reply", {"text": chunk.content})
             for tcc in (getattr(chunk, "tool_call_chunks", None) or []):
                 idx = tcc.get("index") if tcc.get("index") is not None else 0
                 acc = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
@@ -227,6 +241,14 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 args = {}
             norm.append({"name": acc["name"], "args": args,
                          "id": acc["id"] or f"call_{state['steps']}_{i}"})
+        # 过程话术分离：有工具调用的轮次 content 只进 status（过程面板），
+        # 不混入正式回复与会话历史；最终回复一次性 emit（不逐字流式）
+        if norm:
+            if buffer:
+                emit("status", {"text": buffer})
+        else:
+            if buffer:
+                emit("reply", {"text": buffer})
         ai = AIMessage(content=buffer if buffer else "（正在调用工具）")
         if norm:
             ai.tool_calls = norm
@@ -272,7 +294,15 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     result = {"ok": False, "error": f"未知工具: {fname}"}
                 else:
                     try:
-                        result = fn(**args)
+                        if fname in ("query_data", "free_query"):
+                            result = fn(**args, _ctx={"user_regions": user_regions, "sid": sid})
+                        else:
+                            result = fn(**args)
+                    except TypeError:
+                        try:
+                            result = fn(**args)
+                        except Exception as e:  # noqa: BLE001
+                            result = {"ok": False, "error": f"执行失败: {e}"}
                     except Exception as e:  # noqa: BLE001
                         result = {"ok": False, "error": f"执行失败: {e}"}
             preview = json.dumps(result, ensure_ascii=False)[:200] if not isinstance(result, str) else result[:200]

@@ -1,13 +1,11 @@
 """data-query 技能实现：通过数据查询服务（datasvc）访问业务库。
-
 Agent 不直连数据库：SQL 编译、守门校验、执行全部是数据服务内部的实现细节。
+区域权限：由 agent 运行时通过内部 _ctx 参数注入（不在 LLM 工具 schema 中，
+LLM 无法伪造），经请求体 user_regions 字段传给数据服务。
 """
-
 from __future__ import annotations
-
 import json
 import os
-
 _DATASVC = os.environ.get("DATASVC_URL", "http://127.0.0.1:8005")
 
 
@@ -25,10 +23,18 @@ def _get(path: str, params: dict, timeout: float = 30.0) -> dict:
     return resp.json()
 
 
-def query_data(plan_json: str, draw: bool = True, chart_type: str = "auto") -> dict:
-    """受控数据查询：Plan JSON -> 语义层校验 -> SQL 编译 -> 只读执行。"""
+def _ctx_fields(ctx: dict | None) -> dict:
+    """内部上下文 -> 请求体附加字段（区域权限由服务端注入，绝不来自 LLM 参数）。"""
+    if ctx and ctx.get("user_regions"):
+        return {"user_regions": ctx["user_regions"], "sid": ctx.get("sid", "")}
+    return {"sid": (ctx or {}).get("sid", "")}
+
+
+def query_data(plan_json: str, draw: bool = True, chart_type: str = "auto", _ctx: dict | None = None) -> dict:
+    """受控数据查询：Plan JSON -> 语义层校验 -> SQL 编译（区域权限下推 WHERE）-> 只读执行。"""
     try:
-        return _post("/q/plan", {"plan_json": plan_json, "draw": draw, "chart_type": chart_type})
+        return _post("/q/plan", {"plan_json": plan_json, "draw": draw, "chart_type": chart_type,
+                                 **_ctx_fields(_ctx)})
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"数据服务调用失败: {e}"}
 
@@ -41,15 +47,16 @@ def explore_schema(database: str = "", table: str = "") -> dict:
         return {"ok": False, "error": f"数据服务调用失败: {e}"}
 
 
-def free_query(sql: str, params_json: str = "[]", draw: bool = True, chart_type: str = "auto") -> dict:
-    """受控自由查询：SELECT SQL 经五重守门后执行。"""
+def free_query(sql: str, params_json: str = "[]", draw: bool = True, chart_type: str = "auto", _ctx: dict | None = None) -> dict:
+    """受控自由查询：SELECT SQL 经五重守门后执行。受限用户（区域权限）被数据服务直接拒绝。"""
     try:
         params = json.loads(params_json) if params_json else []
     except json.JSONDecodeError:
         params = []
     try:
         return _post("/q/sql", {"sql": sql, "params_json": json.dumps(params, ensure_ascii=False),
-                                 "draw": draw, "chart_type": chart_type})
+                                 "draw": draw, "chart_type": chart_type,
+                                 **_ctx_fields(_ctx)})
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"数据服务调用失败: {e}"}
 
