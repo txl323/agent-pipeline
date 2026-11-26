@@ -209,6 +209,8 @@ def compile_sql(plan: dict, allowed_regions: list[str] | None = None) -> tuple[s
         # 时间维度强制升序（趋势图正确时间轴），其余按指标降序
         if "order_date" in (plan.get("dimensions") or []):
             sql += " ORDER BY order_date ASC LIMIT 1000"
+        elif "order_month" in (plan.get("dimensions") or []):
+            sql += " ORDER BY order_month ASC LIMIT 1000"
         else:
             sql += " ORDER BY value DESC LIMIT 1000"
     # 无分组：单值查询，不需要 ORDER BY/LIMIT

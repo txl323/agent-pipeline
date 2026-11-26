@@ -22,6 +22,7 @@
 | material_code | 物料编码 | so.material_code / po.material_code / inv.material_code | sales/purchase/inventory | （无） |
 | customer | 客户 | so.customer_name | sales | （无） |
 | order_date | 日期 | so.order_date | sales | （无，时间维度） |
+| order_month | 月份 | CONCAT(YEAR(so.order_date), '-', LPAD(MONTH(so.order_date), 2, '0')) | sales | （无，时间维度，月粒度趋势） |
 | supplier | 供应商 | po.supplier_name | purchase | （无） |
 | supplier_region | 供应商区域 | s.region | purchase | JOIN mdm_platform.md_suppliers s ON po.supplier_code = s.supplier_code |
 | warehouse | 仓库 | inv.warehouse | inventory | （无） |

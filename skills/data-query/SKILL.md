@@ -28,7 +28,7 @@ description: 业务数据查询技能。查询销售订单/采购订单/库存�
 
 - **query_data(plan_json, draw, chart_type)**：Plan JSON 语义层查询，口径有保障，优先使用
   - metric：sales_amount/sales_orders/sales_qty/purchase_amount/purchase_orders/inventory_qty
-  - dimensions：customer_region/material/material_code/customer/order_date/supplier/supplier_region/warehouse
+  - dimensions：customer_region/material/material_code/customer/order_date/order_month/supplier/supplier_region/warehouse（order_month 为月粒度，按月趋势优先用它）
   - filters：[{field, op, value}]，可用字段见 plan_schema.md
   - time_macro：last_month/this_month/last_7_days/last_30_days/all
   - draw：分布/趋势/占比/对比类多行数据 true；结构/单值/清单 false
