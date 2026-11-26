@@ -135,7 +135,7 @@ SYSTEM_PROMPT = """你是一个能干的智能助手，通过技能（skills）�
 6. 歧义处理：用户问法有歧义时，先用选项式反问澄清，回复末尾加【待确认】标记；
 7. 画图规范：分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类 draw=false；中间步骤查询一律 draw=false；
 8. 导出门槛：export_csv 仅在用户消息中出现明确导出意图（导出/下载/保存文件/要 CSV/拿明细文件）时才可使用；用户只是想看数据时一律用 data-query 查询展示，禁止擅自导出文件；意图模糊时先反问确认；
-9. 回答规范：所有数字必须来自工具返回结果，严禁编造；结果已图表化展示时回复只写 3-5 句关键结论；对比类问题必须覆盖最高/最低/差距/异常；引用 URL 必须真实。
+9. 回答规范：所有数字必须来自工具返回结果，严禁编造；结果已图表化展示时回复只写 3-5 句关键结论；对比类问题必须覆盖最高/最低/差距/异常；引用 URL 必须真实。结果 ≤ 20 行时必须逐项列全每一条，禁止用『第五名』『其余』『另一个』等模糊指代代替未列出的项。
 
 【技能记忆】以下是跨会话的技能使用记录，供参考避免重复失败尝试：
 {skill_memory}"""
@@ -213,15 +213,43 @@ def _compress_tool_result(tool: str, result) -> str:
     if tool in ("query_data", "free_query") and isinstance(result, dict) and result.get("ok"):
         rows = result.get("rows", [])
         cols = result.get("columns", [])
-        top = "；".join(" / ".join(str(v) for v in r) for r in rows[:3])
-        single = result.get("row_count", 0) <= 1
+        row_count = result.get("row_count", len(rows))
+        stats = result.get("stats") or {}
+        truncated = bool(stats.get("truncated"))
+
+        def _fmt_row(r) -> str:
+            return " | ".join(f"{c}={v}" for c, v in zip(cols, r))
+
+        # 三档分级预览：小结果集全量 / 中结果集头尾 / 大或已截断结果集前 3 行
+        if row_count <= 20:
+            preview = "\n".join(_fmt_row(r) for r in rows)
+            cover = f"已展示全部 {row_count} 行。"
+        elif row_count <= 100 and not truncated:
+            head_n, tail_n = 10, 3
+            if row_count <= head_n + tail_n:
+                preview = "\n".join(_fmt_row(r) for r in rows)
+                cover = f"已展示全部 {row_count} 行。"
+            else:
+                shown_n = head_n + tail_n
+                preview = ("\n".join(_fmt_row(r) for r in rows[:head_n]) + "\n…\n"
+                           + "\n".join(_fmt_row(r) for r in rows[-tail_n:]))
+                cover = (f"已展示 {shown_n}/{row_count} 行（前 {head_n} + 后 {tail_n}），"
+                         f"其余 {row_count - shown_n} 行未展示，仅体现在图表中。"
+                         "禁止描述未展示的行；用户若要求全部列举，建议缩小范围或导出。")
+        else:
+            preview = "\n".join(_fmt_row(r) for r in rows[:3])
+            cover = "结果已截断（LIMIT），仅展示前 3 行，分析仅基于已返回行，禁止外推。"
+
+        single = row_count <= 1
         if single:
             chart_note = "注意：结果只有一行，系统未生成图表。如用户要求画图，必须解释原因并建议对比/分布类问法。"
         elif result.get("draw", True):
-            chart_note = "结果已自动以图表报表形式展示给用户。回复默认不重复输出数据明细，只写3-5句关键结论与解读。"
+            if row_count <= 20:
+                chart_note = "结果已自动以图表报表形式展示给用户。结果行数少，回复必须逐项列全每一行（名称+数值），禁止用『第五名』『其余』等模糊指代。"
+            else:
+                chart_note = "结果已自动以图表报表形式展示给用户。回复默认不重复输出数据明细，只写3-5句关键结论与解读。"
         else:
             chart_note = "本次查询未生成图表（draw=false），请用文字清晰回答。"
-        stats = result.get("stats") or {}
         stats_line = ""
         if stats.get("metric_col"):
             mx, mn = stats.get("max", {}), stats.get("min", {})
@@ -232,9 +260,9 @@ def _compress_tool_result(tool: str, result) -> str:
                           f"{'结果已截断（LIMIT），分析仅基于已返回行' if stats.get('truncated') else '未截断'}")
         ref = result.get("artifact_ref") or ""
         ref_line = f"\n完整结果已存 artifact（ref={ref}），追问细节时引用此 ref，不要重查库" if ref else ""
-        return (f"查询成功，共 {result.get('row_count', len(rows))} 行\n"
-                f"列: {cols}\n前3行摘要: {top}\nSQL: {result.get('sql', '')}\n{chart_note}"
-                f"{stats_line}{ref_line}\n注意：分析结论中的数字必须使用统计摘要与前3行中的真实数字，严禁编造或外推未返回的行。")
+        return (f"查询成功，共 {row_count} 行\n"
+                f"列: {cols}\n数据:\n{preview}\n覆盖声明: {cover}\nSQL: {result.get('sql', '')}\n{chart_note}"
+                f"{stats_line}{ref_line}\n注意：分析结论中的数字必须使用统计摘要与已展示行中的真实数字，严禁编造或外推未返回的行。")
     if tool == "web_search" and isinstance(result, list):
         lines = []
         for r in result[:6]:
