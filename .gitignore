@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 logs/
 sessions/
+semantic/proposals/
+semantic/schema_snapshot.json

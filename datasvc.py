@@ -96,6 +96,26 @@ def healthz() -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def _startup_sync_semantic() -> None:
+    """启动时运行 sync_semantic --no-llm：感知库结构变更并生成提议，失败不阻断服务。"""
+    import subprocess
+    import sys
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        r = subprocess.run(
+            [sys.executable, os.path.join(here, "sync_semantic.py"), "--no-llm"],
+            cwd=here, capture_output=True, text=True, timeout=120,
+        )
+        out = (r.stdout or "").strip()
+        err = (r.stderr or "").strip()
+        print(f"[datasvc] sync_semantic rc={r.returncode} {out}", flush=True)
+        if err:
+            print(f"[datasvc] sync_semantic stderr: {err[:500]}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[datasvc] sync_semantic skipped: {e}", flush=True)
+
+
 if __name__ == "__main__":
     import uvicorn
+    _startup_sync_semantic()
     uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("DATASVC_PORT", "8005")))
