@@ -417,6 +417,23 @@ def _dim_col_text(col) -> str:
     return str(col)
 
 
+def _data_range_text() -> str:
+    """动态统计事实表日期范围（销售/采购），失败时返回说明而不是阻断生成。"""
+    try:
+        with nlsql._db("sap_mock") as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT MIN(d), MAX(d) FROM ("
+                "SELECT order_date AS d FROM sap_sales_orders "
+                "UNION ALL SELECT order_date FROM sap_purchase_orders) t"
+            )
+            row = cur.fetchone()
+        if not row or row[0] is None or row[1] is None:
+            return "未知（无数据）"
+        return "%s ~ %s" % (row[0], row[1])
+    except Exception as e:  # noqa: BLE001
+        return "未知（统计失败: %s）" % e
+
+
 def generate_plan_schema(sem: dict) -> str:
     lines = []
     lines.append("# Plan JSON 参数契约（唯一真相）")
@@ -461,7 +478,7 @@ def generate_plan_schema(sem: dict) -> str:
     lines.append("## 数据范围")
     lines.append("")
     lines.append("- 业务三库只读：bom_system / mdm_platform / sap_mock")
-    lines.append("- 数据时间范围：2026-10-24 ~ 2026-11-23")
+    lines.append("- 数据时间范围：" + _data_range_text())
     lines.append("- 事实表：sap_mock.sap_sales_orders / sap_mock.sap_purchase_orders / sap_mock.sap_inventory")
     lines.append("")
     return "\n".join(lines)

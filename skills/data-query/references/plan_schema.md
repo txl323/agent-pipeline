@@ -68,5 +68,5 @@
 ## 数据范围
 
 - 业务三库只读：bom_system / mdm_platform / sap_mock
-- 数据时间范围：2026-10-24 ~ 2026-11-23
+- 数据时间范围：2025-12-01 ~ 2026-11-26
 - 事实表：sap_mock.sap_sales_orders / sap_mock.sap_purchase_orders / sap_mock.sap_inventory
