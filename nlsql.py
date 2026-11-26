@@ -148,7 +148,8 @@ def compile_sql(plan: dict, allowed_regions: list[str] | None = None) -> tuple[s
     tm = plan.get("time_macro")
     if tm:
         rng = _expand_time_macro(tm)
-        if rng:
+        if rng and ds in ("sales", "purchase"):
+            # 时间宏仅适用于带订单日期的数据源；inventory 为快照表（无 order_date），跳过
             date_col = "so.order_date" if ds == "sales" else "po.order_date"
             where.append(f"{date_col} BETWEEN %s AND %s")
             params.extend(rng)

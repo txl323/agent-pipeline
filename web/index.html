@@ -610,6 +610,40 @@ async function send() {
           curTool.m.text += line;
           curTool.body.textContent += line;
           curTool.body.scrollTop = curTool.body.scrollHeight;
+        } else if (eventName === 'confirm_request') {
+          const turn = lastTurn();
+          const box = document.createElement('div');
+          box.className = 'chartbox';
+          const st = document.createElement('div');
+          st.className = 'ctitle';
+          st.textContent = '⚠ 查询确认（' + payload.tool + '）：' + (payload.reason || '');
+          box.appendChild(st);
+          const pre = document.createElement('pre');
+          pre.style.cssText = 'margin:6px 0;padding:8px;background:rgba(0,0,0,.35);border-radius:6px;white-space:pre-wrap;word-break:break-all;font-size:12px;max-height:180px;overflow:auto;';
+          const a = payload.args || {};
+          pre.textContent = a.sql || a.plan_json || JSON.stringify(a, null, 2);
+          box.appendChild(pre);
+          const btns = document.createElement('div');
+          btns.style.cssText = 'display:flex;gap:10px;margin:6px 0;';
+          const ok = document.createElement('button');
+          ok.textContent = '允许执行';
+          ok.style.cssText = 'padding:5px 16px;border:none;border-radius:6px;background:#4caf50;color:#fff;cursor:pointer;';
+          const no = document.createElement('button');
+          no.textContent = '拒绝';
+          no.style.cssText = 'padding:5px 16px;border:none;border-radius:6px;background:#e53935;color:#fff;cursor:pointer;';
+          btns.appendChild(ok); btns.appendChild(no);
+          box.appendChild(btns);
+          turn.appendChild(box);
+          chat.scrollTop = chat.scrollHeight;
+          const done = (approved) => {
+            ok.disabled = no.disabled = true;
+            ok.style.opacity = no.style.opacity = .5;
+            st.textContent = (approved ? '✓ 已允许' : '✗ 已拒绝') + '（' + payload.tool + '）';
+            fetch('api/confirm', {method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({confirm_id: payload.confirm_id, approved})});
+          };
+          ok.addEventListener('click', () => done(true));
+          no.addEventListener('click', () => done(false));
         } else if (eventName === 'reply') {
           if (!curAI) curAI = ensureAI();
           curAI.m.text += payload.text;

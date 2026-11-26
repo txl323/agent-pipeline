@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import os
 import time
 import uuid
@@ -19,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent_lg import SYSTEM_PROMPT, run_agent_stream
+from agent_lg import SYSTEM_PROMPT, run_agent_stream, list_state_history
 
 load_dotenv()
 
@@ -34,6 +35,11 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     mode: str = "standard"  # off / standard / deep
     user_regions: list[str] | None = None  # 区域权限（服务端注入，None 不受限）
+
+
+class ConfirmRequest(BaseModel):
+    confirm_id: str
+    approved: bool
 
 
 # ---------------- MySQL 访问层 ----------------
@@ -382,6 +388,27 @@ async def run_sql(req: ChatRequest) -> dict:
     return result
 
 
+# ---------------- 确认门（阶段③）：待确认请求注册表 ----------------
+_PENDING_CONFIRMS: dict[str, dict] = {}
+_CONFIRM_TIMEOUT = 180  # 秒：用户最长应答时间，超时视为拒绝
+
+
+@app.post("/api/confirm")
+async def confirm(req: ConfirmRequest) -> dict:
+    item = _PENDING_CONFIRMS.get(req.confirm_id)
+    if item is None:
+        raise HTTPException(404, "确认请求不存在或已过期")
+    item["approved"] = bool(req.approved)
+    item["event"].set()
+    return {"ok": True}
+
+
+@app.get("/api/history/{sid}")
+async def history(sid: str) -> dict:
+    """状态回放：列出会话线程的 LangGraph 检查点历史。"""
+    return {"thread_id": sid, "history": list_state_history(sid)}
+
+
 @app.post("/api/chat")
 async def chat(req: ChatRequest) -> StreamingResponse:
     sid = req.session_id
@@ -463,9 +490,21 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             else:
                 loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
 
+        def confirm_handler(payload: dict) -> bool:
+            """确认门回调（工作线程内同步阻塞）：推 confirm_request 事件，等 /api/confirm 应答。"""
+            cid = uuid.uuid4().hex[:12]
+            ev = threading.Event()
+            _PENDING_CONFIRMS[cid] = {"event": ev, "approved": False}
+            loop.call_soon_threadsafe(queue.put_nowait,
+                ("confirm_request", {"confirm_id": cid, **payload}))
+            ev.wait(timeout=_CONFIRM_TIMEOUT)
+            approved = bool(_PENDING_CONFIRMS.pop(cid, {}).get("approved"))
+            return approved
+
         def run_sync() -> dict:
             return run_agent_stream(messages, mode=mode, on_event=on_event, plan=plan,
-                                    sid=sid, user_regions=user_regions)
+                                    sid=sid, user_regions=user_regions,
+                                    thread_id=sid, confirm_handler=confirm_handler)
 
         task = loop.run_in_executor(None, run_sync)
 
@@ -477,6 +516,10 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             yield emit(event, payload)
 
         result = await task
+        # 确认门中断（原生 interrupt 路径）：本轮无回复，等用户确认后由前端续问恢复
+        if result.get("interrupted"):
+            yield emit("end", {"steps": result.get("steps", 0), "interrupted": True})
+            return
         # 计划收尾：工具调用轮次未必覆盖全部步骤，回复完成即计划完成，补发 100% 进度
         if plan_id:
             yield emit("plan_progress", {"step": plan_total, "total": plan_total, "progress": 100})

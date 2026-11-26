@@ -22,11 +22,62 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+from langgraph.checkpoint.memory import InMemorySaver
 
 import skill_runtime as sr
 
 load_dotenv()
+# ---------------- LangGraph 状态能力（阶段③） ----------------
+# Checkpointer：默认内存版；设 LG_CHECKPOINT_DB=路径 时用 SQLite 持久化（重启不丢状态）
+_CHECKPOINT_DB = os.environ.get("LG_CHECKPOINT_DB", "")
+if _CHECKPOINT_DB:
+    import sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    _CHECKPOINTER = SqliteSaver(sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False))
+else:
+    _CHECKPOINTER = InMemorySaver()
+# 确认门：高基维度（全量无过滤时结果集可能较大）
+_HIGH_CARD_DIMS = {"customer", "material_code"}
 
+
+def _gate_reason(fname: str, args: dict) -> str:
+    """确认门判定：敏感查询（free_query）或大结果集风险（全量+高基维度）需用户确认。"""
+    if fname == "free_query":
+        return "free_query 自由 SQL（敏感查询）"
+    if fname == "query_data":
+        pj = args.get("plan_json")
+        if isinstance(pj, str):
+            try:
+                pj = json.loads(pj)
+            except json.JSONDecodeError:
+                pj = {}
+        if isinstance(pj, dict):
+            tm = pj.get("time_macro") or "all"
+            dims = pj.get("dimensions") or []
+            if tm == "all" and not pj.get("filters") and any(d in _HIGH_CARD_DIMS for d in dims):
+                return "大结果集风险查询（全量+高基维度，无时间范围与过滤条件）"
+    return ""
+
+
+def list_state_history(thread_id: str, limit: int = 20) -> list[dict]:
+    """状态回放：列出线程的检查点历史（step/步数/待执行工具/回复摘要）。"""
+    out: list[dict] = []
+    try:
+        for t in _CHECKPOINTER.list({"configurable": {"thread_id": thread_id}}, limit=limit):
+            cv = t.checkpoint.get("channel_values") or {}
+            out.append({
+                "checkpoint_id": t.config.get("configurable", {}).get("checkpoint_id", ""),
+                "step": t.metadata.get("step"),
+                "ts": t.checkpoint.get("ts", ""),
+                "steps": cv.get("steps", 0),
+                "pending_tools": [c.get("name") for c in (cv.get("pending_calls") or [])],
+                "trace_rounds": len(cv.get("trace") or []),
+                "reply_preview": (cv.get("final_reply") or "")[:120],
+            })
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 MAX_STEPS = 15
 VERIFY_MAX_ROUNDS = 2
 
@@ -170,7 +221,10 @@ def _collect_evidence(tool: str, args: dict, result, evidences: list) -> None:
 def run_agent_stream(messages: list[dict], mode: str = "standard",
                       on_event: Callable[[str, dict], None] = lambda e, d: None,
                       plan: dict | None = None, sid: str = "",
-                      user_regions: list[str] | None = None) -> dict:
+                      user_regions: list[str] | None = None,
+                      thread_id: str = "",
+                      confirm_handler: Callable[[dict], bool] | None = None,
+                      resume_value: Any = None) -> dict:
     """LangGraph 主入口：与原版 run_agent_stream 签名/返回兼容。
     user_regions：区域权限（服务端注入，None 不受限），经 _ctx 下传数据服务，不进 LLM schema。
     """
@@ -295,6 +349,24 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                 if fn is None:
                     result = {"ok": False, "error": f"未知工具: {fname}"}
                 else:
+                    # 确认门（阶段③）：敏感/大结果集查询须用户确认后才执行
+                    reason = _gate_reason(fname, args)
+                    if reason:
+                        gate_payload = {"tool": fname, "reason": reason,
+                                        "args": {k: args.get(k) for k in ("sql", "plan_json") if k in args}}
+                        if confirm_handler is not None:
+                            # 服务端路径：同步阻塞等待用户应答（SSE confirm_request + /api/confirm）
+                            approved = bool(confirm_handler(gate_payload))
+                        else:
+                            # LangGraph 原生路径：interrupt 中断，Command(resume=...) 恢复
+                            approved = interrupt(gate_payload)
+                        if not approved:
+                            emit("tool_end", {"tool": fname, "preview": "用户已拒绝本次查询"})
+                            trace.append({"round": step, "tool": fname,
+                                          "query": "（确认门：用户拒绝）" + str(args)[:100], "urls": []})
+                            msgs.append(ToolMessage(content="用户拒绝了本次查询。注意：这是用户明确意愿，禁止再用 free_query 或同类大范围查询重试（会被再次拒绝）。只能：①改用语义层 query_data 并加时间范围/过滤条件缩小结果集；②或直接基于已有数据回答，并向用户说明被拒原因与替代问法",
+                                                    tool_call_id=str(tc.get("id") or f"call_{step}")))
+                            continue
                     try:
                         if fname in ("query_data", "free_query"):
                             result = fn(**args, _ctx={"user_regions": user_regions, "sid": sid})
@@ -384,14 +456,32 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     g.add_conditional_edges("agent", route_after_agent, {"skill_exec": "skill_exec", "verify": "verify", END: END})
     g.add_edge("skill_exec", "agent")
     g.add_conditional_edges("verify", route_after_verify, {"agent": "agent", END: END})
-    graph = g.compile()
+    graph = g.compile(checkpointer=_CHECKPOINTER)
+    # 线程绑定（阶段③）：thread_id 绑会话，检查点跨调用持久化，支持状态回放
+    cfg = {"configurable": {"thread_id": thread_id or sid or "default"},
+           "recursion_limit": 4 * MAX_STEPS}
 
     init: AgentState = {"messages": hist, "trace": [], "evidences": [],
                         "verify_rounds": 0, "steps": 0, "pending_calls": [], "final_reply": ""}
     # 步数上限保护：MAX_STEPS 轮 agent 决策后强制收尾
     final_state = init
+    _resuming = resume_value is not None
     for _ in range(MAX_STEPS):
-        final_state = graph.invoke(final_state, config={"recursion_limit": 4 * MAX_STEPS})
+        if _resuming:
+            # 从 interrupt 断点恢复：状态由检查点提供，Command(resume=...) 送达中断点
+            final_state = graph.invoke(Command(resume=resume_value), config=cfg)
+            _resuming = False
+        else:
+            final_state = graph.invoke(final_state, config=cfg)
+        if isinstance(final_state, dict) and final_state.get("__interrupt__"):
+            # LangGraph 原生 interrupt：推送确认请求并提前返回，下次调用传 resume_value 恢复
+            intr = final_state["__interrupt__"][0]
+            payload = intr.value if isinstance(intr.value, dict) else {"detail": str(intr.value)}
+            emit("confirm_request", payload)
+            return {"reply": "", "steps": final_state.get("steps", 0),
+                    "evidences": final_state.get("evidences", []),
+                    "trace": final_state.get("trace", []),
+                    "report": None, "interrupted": payload}
         if not final_state["pending_calls"]:
             # 无待执行工具即结束（verify 回环已在图内完成或判定通过）
             if final_state["messages"] and not isinstance(final_state["messages"][-1], HumanMessage):
