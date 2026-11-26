@@ -472,6 +472,7 @@ function regenerate(m) {
 
 // ---------- 发送与流式 ----------
 let curThinking = null, curTool = null, curAI = null;
+let curPlanEl = null;  // 当前计划卡片（跨轮复用计划时避免堆叠、进度落错卡片）
 
 function ensurePanel(kind) {
   const c = activeConv();
@@ -528,7 +529,7 @@ async function send() {
 
   c.messages.push({ kind: 'user', text });
   appendMsgEl(c.messages[c.messages.length - 1]);
-  curThinking = null; curTool = null; curAI = null;
+  curThinking = null; curTool = null; curAI = null; curPlanEl = null;
 
   try {
     const resp = await fetch('api/chat', {
@@ -559,8 +560,15 @@ async function send() {
           c.sid = payload.session_id;
         } else if (eventName === 'plan') {
           const turn = lastTurn();
-          const inner = document.createElement('div');
-          inner.className = 'plan';
+          // 跨轮复用计划：服务端标记 reused 且上一张卡片仍在文档中时，清空复用而非新建
+          if (payload.reused && curPlanEl && curPlanEl.isConnected) {
+            curPlanEl.innerHTML = '';
+          } else {
+            const inner = document.createElement('div');
+            inner.className = 'plan';
+            curPlanEl = inner;
+          }
+          const inner = curPlanEl;
           const pt = document.createElement('div');
           pt.className = 'pt';
           pt.textContent = '任务计划';
@@ -585,7 +593,7 @@ async function send() {
           turn.appendChild(inner);
           chat.scrollTop = chat.scrollHeight;
         } else if (eventName === 'plan_progress') {
-          const planEl = chat.querySelector('.turn:last-child .plan');
+          const planEl = curPlanEl || chat.querySelector('.turn:last-child .plan');
           if (planEl) {
             planEl.querySelectorAll('.pstep').forEach((row, i) => {
               row.classList.toggle('done', i < payload.step);

@@ -440,6 +440,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         except Exception:  # noqa: BLE001
             plan = None
     # 新计划落库（复用的计划不重复落库）
+    plan_reused = plan_id is not None  # 跨轮复用标记：前端据此复用卡片而非新建
     if plan and plan_id is None:
         plan_id = save_plan(sid, plan)
 
@@ -453,9 +454,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
         yield emit("session", {"session_id": sid, "mode": mode})
 
-        # 计划推送（落库已在生成/复用时完成）
+        # 计划推送（落库已在生成/复用时完成；reused 标记跨轮复用，前端复用卡片）
         if plan:
-            yield emit("plan", {"plan": plan})
+            yield emit("plan", {"plan": plan, "plan_id": plan_id, "reused": plan_reused})
 
         loop = asyncio.get_event_loop()
         queue: asyncio.Queue = asyncio.Queue()
