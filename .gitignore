@@ -6,3 +6,5 @@ logs/
 sessions/
 semantic/proposals/
 semantic/schema_snapshot.json
+semantic/audit.log
+semantic/backup/

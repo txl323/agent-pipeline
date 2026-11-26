@@ -29,14 +29,20 @@ QUERY_TIMEOUT_S = 30
 EXPLAIN_MAX_ROWS = 1_000_000
 
 _semantic_cache: dict | None = None
+_semantic_mtime: float | None = None
 
 
 def load_semantic() -> dict:
-    """加载语义层（进程内缓存）。"""
-    global _semantic_cache
-    if _semantic_cache is None:
+    """加载语义层（mtime 热重载：文件变更后自动重新加载，进程内缓存）。"""
+    global _semantic_cache, _semantic_mtime
+    try:
+        mtime = os.path.getmtime(SEMANTIC_FILE)
+    except OSError:
+        mtime = None
+    if _semantic_cache is None or mtime != _semantic_mtime:
         with open(SEMANTIC_FILE, encoding="utf-8") as f:
             _semantic_cache = yaml.safe_load(f)
+        _semantic_mtime = mtime
     return _semantic_cache
 
 

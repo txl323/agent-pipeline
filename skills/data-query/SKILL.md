@@ -24,13 +24,11 @@ description: 业务数据查询技能。查询销售订单/采购订单/库存�
 4. 优先用一次查询拿到全部所需数据（如带占比的分组查询），避免先查总量再逐个查明细
 
 ## 参数契约
-完整契约（合法指标/维度/过滤字段/时间宏/物理列名映射）见 `references/plan_schema.md`（由语义层生成或手工同步）。要点：
+完整契约（合法指标/维度/过滤字段/时间宏/物理列名映射）以 `references/plan_schema.md` 为唯一真相——由语义层 semantic_v1.yaml 自动生成（sync_semantic --apply/--rollback 会重生成），不要在本文件重复罗列字段。
 
 - **query_data(plan_json, draw, chart_type)**：Plan JSON 语义层查询，口径有保障，优先使用
-  - metric：sales_amount/sales_orders/sales_qty/purchase_amount/purchase_orders/inventory_qty
-  - dimensions：customer_region/material/material_code/customer/order_date/order_month/supplier/supplier_region/warehouse（order_month 为月粒度，按月趋势优先用它）
-  - filters：[{field, op, value}]，可用字段见 plan_schema.md
-  - time_macro：last_month/this_month/last_7_days/last_30_days/all
+  - metric / dimensions / filters / time_macro 的合法取值：一律以 plan_schema.md 为准（其中 order_month 为月粒度，按月趋势优先用它）
+  - filters 形如 [{field, op, value}]，field 须在 plan_schema.md 过滤字段白名单内
   - draw：分布/趋势/占比/对比类多行数据 true；结构/单值/清单 false
   - chart_type：bar/pie/line/auto
 - **free_query(sql)**：受控 SELECT，表必须带库名前缀（如 sap_mock.sap_sales_orders）。注意：material 是语义层合法维度，物理列名是 material_name

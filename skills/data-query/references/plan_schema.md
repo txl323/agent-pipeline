@@ -1,17 +1,17 @@
 # Plan JSON 参数契约（唯一真相）
 
-> 由语义层 `semantic/semantic_v1.yaml`（version 1.0.0）同步生成。修改语义层后须重新同步本文件。
+> 由语义层 `semantic/semantic_v1.yaml`（version 1.0.1）自动生成。不要手工改本文件；改语义层后执行 sync_semantic --apply/--rollback 会重生成。
 
 ## 指标（metric）
 
 | 指标 | 名称 | 别名 | 数据源 | SQL 表达式 |
 |---|---|---|---|---|
-| sales_amount | 销售额 | 销售金额/营收/金额/GMV | sales | SUM(so.amount) |
+| sales_amount | 销售额 | 销售金额/卖了多少/营收/金额 | sales | SUM(so.amount) |
 | sales_orders | 订单数 | 销售订单数/单量/订单量 | sales | COUNT(*) |
-| sales_qty | 销售数量 | 销量/数量 | sales | SUM(so.quantity) |
-| purchase_amount | 采购额 | 采购金额/采购总额 | purchase | SUM(po.amount) |
+| sales_qty | 销售数量 | 销量/卖了多少件/数量 | sales | SUM(so.quantity) |
+| purchase_amount | 采购额 | 采购金额/采购总额/买了多少 | purchase | SUM(po.amount) |
 | purchase_orders | 采购订单数 | 采购单量 | purchase | COUNT(*) |
-| inventory_qty | 库存量 | 库存/现有库存 | inventory | SUM(inv.quantity) |
+| inventory_qty | 库存量 | 库存/现有库存/剩多少 | inventory | SUM(inv.quantity) |
 
 ## 维度（dimensions）
 
@@ -22,10 +22,11 @@
 | material_code | 物料编码 | so.material_code / po.material_code / inv.material_code | sales/purchase/inventory | （无） |
 | customer | 客户 | so.customer_name | sales | （无） |
 | order_date | 日期 | so.order_date | sales | （无，时间维度） |
-| order_month | 月份 | CONCAT(YEAR(so.order_date), '-', LPAD(MONTH(so.order_date), 2, '0')) | sales | （无，时间维度，月粒度趋势） |
+| order_month | 月份 | CONCAT(YEAR(so.order_date), '-', LPAD(MONTH(so.order_date), 2, '0')) | sales | （无，时间维度） |
 | supplier | 供应商 | po.supplier_name | purchase | （无） |
 | supplier_region | 供应商区域 | s.region | purchase | JOIN mdm_platform.md_suppliers s ON po.supplier_code = s.supplier_code |
 | warehouse | 仓库 | inv.warehouse | inventory | （无） |
+| channel | 销售渠道 | so.channel | sales | （无） |
 
 **注意**：`material` 是语义层合法维度，物理列名是 `material_name`（free_query 写 SQL 时必须用物理列名）。
 
@@ -63,12 +64,6 @@
 | last_7_days | 最近 7 天 |
 | last_30_days | 最近 30 天 |
 | all | 全部数据（默认） |
-
-## Plan JSON 示例
-
-```json
-{"metric": "sales_amount", "dimensions": ["customer_region"], "filters": [{"field": "customer_region", "op": "=", "value": "华南"}], "time_macro": "all"}
-```
 
 ## 数据范围
 

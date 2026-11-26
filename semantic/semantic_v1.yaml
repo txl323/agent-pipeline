@@ -2,7 +2,7 @@
 # 事实表：sap_mock.sap_sales_orders / sap_purchase_orders / sap_inventory
 # 维度数据：mdm_platform（供应商区域/客户区域）
 
-version: "1.0.0"
+version: "1.0.1"
 
 datasources:
   sales: "sap_mock"
@@ -111,6 +111,14 @@ dimensions:
     column: "inv.warehouse"
     join: ""
     applies_to: [inventory]
+  channel:
+    name: 销售渠道
+    aliases:
+    - 渠道
+    column: so.channel
+    applies_to:
+    - sales
+    join: ''
 
 # 时间宏：宏名 -> [起始日期, 结束日期]（由编译器展开为具体日期）
 time_macros:
