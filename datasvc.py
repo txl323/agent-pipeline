@@ -8,6 +8,7 @@
   受限用户：query_data 编译时下推 WHERE region IN (...)；free_query 直接禁用。
 """
 from __future__ import annotations
+import json
 import os
 import pymysql
 from dotenv import load_dotenv
@@ -47,6 +48,13 @@ def q_plan(req: PlanReq) -> dict:
     if isinstance(result, dict):
         result["draw"] = req.draw
         result["chart_type"] = req.chart_type if req.chart_type in ("bar", "pie", "line") else "auto"
+        # 时间维度强制折线图：趋势类查询（order_date/order_month）无论 LLM 传何图型一律 line
+        try:
+            _pj = json.loads(req.plan_json) if isinstance(req.plan_json, str) else req.plan_json
+            if isinstance(_pj, dict) and any(d in (_pj.get("dimensions") or []) for d in ("order_date", "order_month")):
+                result["chart_type"] = "line"
+        except Exception:  # noqa: BLE001
+            pass
     return result
 
 
