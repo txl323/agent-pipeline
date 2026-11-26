@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from typing import Any, Callable, TypedDict
 
 from dotenv import load_dotenv
@@ -26,6 +28,7 @@ from langgraph.types import Command, interrupt
 from langgraph.checkpoint.memory import InMemorySaver
 
 import skill_runtime as sr
+import nlsql
 
 load_dotenv()
 # ---------------- LangGraph 状态能力（阶段③） ----------------
@@ -39,6 +42,41 @@ else:
     _CHECKPOINTER = InMemorySaver()
 # 确认门：高基维度（全量无过滤时结果集可能较大）
 _HIGH_CARD_DIMS = {"customer", "material_code"}
+
+# ---------------- plan 缓存（阶段B） ----------------
+# 问题指纹 → 已确认的查询计划。键含语义层版本：semantic_v1.yaml 变更后自动失效。
+_PLAN_CACHE: dict[str, dict] = {}
+_PLAN_CACHE_MAX = 100
+
+
+def _question_fingerprint(question: str) -> str:
+    """问题归一化指纹：仅保留中英文与数字，小写，截断 120 字符。"""
+    return re.sub(r"[^0-9A-Za-z一-龥]+", "", question).lower()[:120]
+
+
+def _plan_cache_lookup(question: str) -> str | None:
+    """命中返回缓存的 plan_json（语义层版本不匹配视为未命中并清除）。"""
+    fp = _question_fingerprint(question)
+    if not fp:
+        return None
+    entry = _PLAN_CACHE.get(fp)
+    if not entry:
+        return None
+    if entry.get("sem_ver") != nlsql.semantic_version():
+        _PLAN_CACHE.pop(fp, None)
+        return None
+    return entry.get("plan_json")
+
+
+def _plan_cache_store(question: str, plan_json: str) -> None:
+    fp = _question_fingerprint(question)
+    if not fp or not plan_json:
+        return
+    if len(_PLAN_CACHE) >= _PLAN_CACHE_MAX:
+        oldest = min(_PLAN_CACHE, key=lambda k: _PLAN_CACHE[k].get("ts", 0))
+        _PLAN_CACHE.pop(oldest, None)
+    _PLAN_CACHE[fp] = {"plan_json": plan_json, "sem_ver": nlsql.semantic_version(),
+                       "ts": time.time()}
 
 
 def _gate_reason(fname: str, args: dict) -> str:
@@ -265,6 +303,18 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
             continue
         hist.append(HumanMessage(content=content) if m.get("role") == "user" else AIMessage(content=content))
 
+    # plan 缓存命中（阶段B）：注入已确认计划，跳过重新规划
+    _last_question = next((m.get("content") or "" for m in reversed(messages)
+                          if m.get("role") == "user"), "")
+    _cached_plan = _plan_cache_lookup(_last_question)
+    if _cached_plan:
+        hist[0] = SystemMessage(content=hist[0].content +
+            "\n【计划缓存】该问题此前已执行过查询计划且成功，直接复用（不要重新规划）：\n"
+            + _cached_plan +
+            "\n先 load_skill 加载 data-query 技能，然后按上述计划原样调用 query_data（参数不变），拿到结果后直接作答。")
+        emit("status", {"text": "（命中计划缓存，复用已确认查询计划）"})
+    # 本轮成功计划采集容器（首个成功的 query_data 计划）
+    _good_plan: list[str] = []
     # ---------------- 图节点 ----------------
 
     def agent_node(state: AgentState) -> dict:
@@ -399,6 +449,8 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     "sem_ver": result.get("sem_ver", ""),
                     "chart_type": result.get("chart_type", "auto"),
                 })
+            if fname == "query_data" and isinstance(result, dict) and result.get("ok") and not _good_plan:
+                _good_plan.append(str(args.get("plan_json") or ""))
             _collect_evidence(fname, args, result, evidences)
             ok = not (isinstance(result, dict) and result.get("ok") is False)
             if fname != "load_skill":
@@ -494,6 +546,9 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     # 统一出图：验证通过/流程收尾后推送最终唯一一张图（候选被后续图替换时只保留最后一张）
     if chart_candidate:
         emit("chart", chart_candidate[-1])
+    # plan 缓存写入（阶段B）：本轮有成功计划且最终回复非空时缓存
+    if _good_plan and final_state.get("final_reply"):
+        _plan_cache_store(_last_question, _good_plan[0])
     return {"reply": final_state["final_reply"], "steps": final_state["steps"],
             "evidences": final_state["evidences"], "trace": final_state["trace"], "report": None}
 
