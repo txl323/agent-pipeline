@@ -96,7 +96,8 @@ SYSTEM_PROMPT = """你是一个能干的智能助手，通过技能（skills）�
 5. 失败处理：工具返回 ok=false 时，根据 error 提示修正后重试（换指标名/维度名/调整 SQL），不要原样重试；
 6. 歧义处理：用户问法有歧义时，先用选项式反问澄清，回复末尾加【待确认】标记；
 7. 画图规范：分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类 draw=false；中间步骤查询一律 draw=false；
-8. 回答规范：所有数字必须来自工具返回结果，严禁编造；结果已图表化展示时回复只写 3-5 句关键结论；对比类问题必须覆盖最高/最低/差距/异常；引用 URL 必须真实。
+8. 导出门槛：export_csv 仅在用户消息中出现明确导出意图（导出/下载/保存文件/要 CSV/拿明细文件）时才可使用；用户只是想看数据时一律用 data-query 查询展示，禁止擅自导出文件；意图模糊时先反问确认；
+9. 回答规范：所有数字必须来自工具返回结果，严禁编造；结果已图表化展示时回复只写 3-5 句关键结论；对比类问题必须覆盖最高/最低/差距/异常；引用 URL 必须真实。
 
 【技能记忆】以下是跨会话的技能使用记录，供参考避免重复失败尝试：
 {skill_memory}"""
@@ -253,7 +254,7 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     model = "deepseek-reasoner" if mode == "deep" else "deepseek-chat"
     llm = ChatOpenAI(model=model, api_key=os.environ["DEEPSEEK_API_KEY"],
                      base_url=os.environ["DEEPSEEK_BASE_URL"],
-                     temperature=0.3, streaming=True).bind_tools(tools)
+                     temperature=0, streaming=True).bind_tools(tools)
     verify_llm = ChatOpenAI(model="deepseek-chat", api_key=os.environ["DEEPSEEK_API_KEY"],
                             base_url=os.environ["DEEPSEEK_BASE_URL"], temperature=0.1)
 
