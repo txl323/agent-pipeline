@@ -362,13 +362,30 @@ def get_messages(sid: str) -> dict:
     return {"session_id": sid, "messages": visible}
 
 
+_DATA_QUERY_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "skills", "data-query", "scripts", "data_query.py")
+_free_query_fn = None
+
+
+def _load_free_query():
+    """从 skills/data-query 脚本加载 free_query（目录名带连字符，非合法包名，须按文件路径加载）。"""
+    global _free_query_fn
+    if _free_query_fn is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("data_query_script", _DATA_QUERY_SCRIPT)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _free_query_fn = mod.free_query
+    return _free_query_fn
+
+
 @app.post("/api/sql")
 async def run_sql(req: ChatRequest) -> dict:
     """SQL 直执行：跳过 NL 解析，直接执行 SELECT（复用 free_query 五重守门）。
 
     message 字段传 SQL 语句；session_id 可选（用于落库留痕）。
     """
-    from tools.dbtools import free_query
+    free_query = _load_free_query()
     sql = (req.message or "").strip()
     if not sql:
         raise HTTPException(400, "SQL 为空")
