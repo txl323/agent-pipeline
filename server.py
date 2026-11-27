@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import threading
 import os
 import time
 import uuid
@@ -407,24 +406,24 @@ async def run_sql(req: ChatRequest) -> dict:
 
 
 # ---------------- 确认门（阶段③）：待确认请求注册表 ----------------
-_PENDING_CONFIRMS: dict[str, dict] = {}
+_PENDING_CONFIRMS: dict[str, asyncio.Event] = {}
 _CONFIRM_TIMEOUT = 180  # 秒：用户最长应答时间，超时视为拒绝
 
 
 @app.post("/api/confirm")
 async def confirm(req: ConfirmRequest) -> dict:
-    item = _PENDING_CONFIRMS.get(req.confirm_id)
-    if item is None:
+    ev = _PENDING_CONFIRMS.get(req.confirm_id)
+    if ev is None:
         raise HTTPException(404, "确认请求不存在或已过期")
-    item["approved"] = bool(req.approved)
-    item["event"].set()
+    ev.approved = bool(req.approved)
+    ev.set()
     return {"ok": True}
 
 
 @app.get("/api/history/{sid}")
 async def history(sid: str) -> dict:
     """状态回放：列出会话线程的 LangGraph 检查点历史。"""
-    return {"thread_id": sid, "history": list_state_history(sid)}
+    return {"thread_id": sid, "history": await list_state_history(sid)}
 
 
 @app.post("/api/chat")
@@ -475,7 +474,6 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         if plan:
             yield emit("plan", {"plan": plan, "plan_id": plan_id, "reused": plan_reused})
 
-        loop = asyncio.get_event_loop()
         queue: asyncio.Queue = asyncio.Queue()
         # 图表持久化：捕获 chart 事件，随回复一起落库
         charts: list[dict] = []
@@ -486,71 +484,68 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         plan_step = 0
         plan_total = len(plan["steps"]) if plan else 0
 
-        def on_event(event: str, payload: dict) -> None:
-            nonlocal plan_step, report
-            if event == "chart":
-                charts.append(payload)
-            elif event == "report":
-                report = payload
-            if plan_id and event == "tool_start":
-                plan_step += 1
-                progress = min(100, int(plan_step / max(plan_total, 1) * 100))
-                try:
-                    update_plan_progress(plan_id, progress)
-                except Exception:  # noqa: BLE001
-                    pass
-                loop.call_soon_threadsafe(
-                    queue.put_nowait,
-                    ("plan_progress", {"step": min(plan_step, plan_total),
-                                       "total": plan_total, "progress": progress}),
-                )
-                # tool_start 本身也要转发，plan 模式下不能吞掉
-                loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
-            else:
-                loop.call_soon_threadsafe(queue.put_nowait, (event, payload))
+        final_result: dict = {}
 
-        def confirm_handler(payload: dict) -> bool:
-            """确认门回调（工作线程内同步阻塞）：推 confirm_request 事件，等 /api/confirm 应答。
+        async def confirm_handler(payload: dict) -> bool:
+            """确认门回调：推 confirm_request 事件，等 /api/confirm 应答。
             只读免确认开关开启时直接放行（守门不变，仅跳过重复确认）。"""
             if req.auto_approve_readonly:
                 return True
             cid = uuid.uuid4().hex[:12]
-            ev = threading.Event()
+            ev = asyncio.Event()
             _PENDING_CONFIRMS[cid] = {"event": ev, "approved": False}
-            loop.call_soon_threadsafe(queue.put_nowait,
-                ("confirm_request", {"confirm_id": cid, **payload}))
-            ev.wait(timeout=_CONFIRM_TIMEOUT)
+            queue.put_nowait(("confirm_request", {"confirm_id": cid, **payload}))
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=_CONFIRM_TIMEOUT)
+            except asyncio.TimeoutError:
+                pass
             approved = bool(_PENDING_CONFIRMS.pop(cid, {}).get("approved"))
             return approved
 
-        def run_sync() -> dict:
-            return run_agent_stream(messages, mode=mode, on_event=on_event, plan=plan,
-                                    sid=sid, user_regions=user_regions,
-                                    thread_id=sid, confirm_handler=confirm_handler)
+        async def _producer():
+            nonlocal plan_step, report, final_result
+            async for ev, data in run_agent_stream(messages, mode=mode, plan=plan,
+                                                    sid=sid, user_regions=user_regions,
+                                                    thread_id=sid, confirm_handler=confirm_handler):
+                if ev == "chart":
+                    charts.append(data)
+                elif ev == "report":
+                    report = data
+                if plan_id and ev == "tool_start":
+                    plan_step += 1
+                    progress = min(100, int(plan_step / max(plan_total, 1) * 100))
+                    try:
+                        update_plan_progress(plan_id, progress)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    queue.put_nowait(("plan_progress", {"step": min(plan_step, plan_total),
+                                                       "total": plan_total, "progress": progress}))
+                if ev == "final":
+                    final_result = data
+                else:
+                    queue.put_nowait((ev, data))
 
-        task = loop.run_in_executor(None, run_sync)
+        producer_task = asyncio.create_task(_producer())
 
-        while not task.done() or not queue.empty():
+        while True:
             try:
-                event, payload = await asyncio.wait_for(queue.get(), timeout=0.15)
+                ev, payload = await asyncio.wait_for(queue.get(), timeout=0.15)
             except asyncio.TimeoutError:
+                if producer_task.done():
+                    break
                 continue
-            yield emit(event, payload)
+            yield emit(ev, payload)
 
-        result = await task
-        # 确认门中断（原生 interrupt 路径）：本轮无回复，等用户确认后由前端续问恢复
-        if result.get("interrupted"):
-            yield emit("end", {"steps": result.get("steps", 0), "interrupted": True})
-            return
+        await producer_task
         # 计划收尾：工具调用轮次未必覆盖全部步骤，回复完成即计划完成，补发 100% 进度
         if plan_id:
             yield emit("plan_progress", {"step": plan_total, "total": plan_total, "progress": 100})
 
         # 证据入库 + 回复来源校验
-        save_evidences(sid, result.get("evidences", []))
-        sources = verify_reply_sources(sid, result["reply"])
+        save_evidences(sid, final_result.get("evidences", []))
+        sources = verify_reply_sources(sid, final_result["reply"])
 
-        reply_content = result["reply"]
+        reply_content = final_result["reply"]
         # 落库去重：只保留最后一个图表（重绘/美化迭代的中间图无保留价值）
         for cp in charts[-1:]:
             reply_content += "\n<!--CHART:" + json.dumps(cp, ensure_ascii=False) + "-->"
@@ -564,20 +559,20 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         if sources:
             yield emit("sources", {"sources": sources})
         # 执行轨迹：按轮次列出调用的工具与查阅的网页
-        trace = result.get("trace") or []
+        trace = final_result.get("trace") or []
         if trace:
             yield emit("trace", {"trace": trace})
         if plan_id:
             try:
                 # 真实状态：本轮实际执行了工具，且回复末尾无【待确认】标记，
                 # 才标记完成；澄清/确认轮（模型显式标记）保持 running，供下一轮延续
-                reply_text = (result["reply"] or "").rstrip()
+                reply_text = (final_result["reply"] or "").rstrip()
                 awaiting = "【待确认】" in reply_text[-30:]
-                if result["steps"] > 1 and not awaiting:
+                if final_result["steps"] > 1 and not awaiting:
                     update_plan_progress(plan_id, 100, "done")
             except Exception:  # noqa: BLE001
                 pass
-        yield emit("end", {"steps": result["steps"]})
+        yield emit("end", {"steps": final_result["steps"]})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

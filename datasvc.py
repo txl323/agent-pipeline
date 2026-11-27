@@ -10,6 +10,7 @@
 from __future__ import annotations
 import json
 import os
+import time
 import pymysql
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -47,14 +48,19 @@ def q_plan(req: PlanReq) -> dict:
     result = nlsql.run_plan(req.plan_json, allowed_regions=req.user_regions, sid=req.sid)
     if isinstance(result, dict):
         result["draw"] = req.draw
-        result["chart_type"] = req.chart_type if req.chart_type in ("bar", "pie", "line") else "auto"
-        # 时间维度强制折线图：趋势类查询（order_date/order_month）无论 LLM 传何图型一律 line
+        result["chart_type"] = req.chart_type if req.chart_type in ("bar", "pie", "line", "dual", "scatter", "stacked") else "auto"
+        # 时间维度强制折线图：趋势类查询（order_date/order_month）无论 LLM 传何图型一律 line；
+        # 豁免：dual（双轴）与多子图场景由 chart 技能轻量 spec 决定，不强制覆盖
         try:
             _pj = json.loads(req.plan_json) if isinstance(req.plan_json, str) else req.plan_json
-            if isinstance(_pj, dict) and any(d in (_pj.get("dimensions") or []) for d in ("order_date", "order_month")):
+            if (isinstance(_pj, dict)
+                    and any(d in (_pj.get("dimensions") or []) for d in ("order_date", "order_month"))
+                    and result.get("chart_type") not in ("dual", "stacked", "scatter")):
                 result["chart_type"] = "line"
         except Exception:  # noqa: BLE001
             pass
+        # artifact_ref：查询结果引用，供 chart 技能取数（轻量 spec 的输入）
+        result["artifact_ref"] = f"plan:{req.sid}:{int(time.time() * 1000) % 100000}"
     return result
 
 
@@ -69,7 +75,9 @@ def q_sql(req: SqlReq) -> dict:
     result = nlsql.free_query(req.sql, params, allowed_regions=req.user_regions, sid=req.sid)
     if isinstance(result, dict):
         result["draw"] = req.draw
-        result["chart_type"] = req.chart_type if req.chart_type in ("bar", "pie", "line") else "auto"
+        result["chart_type"] = req.chart_type if req.chart_type in ("bar", "pie", "line", "dual", "scatter", "stacked") else "auto"
+        # artifact_ref：查询结果引用，供 chart 技能取数
+        result["artifact_ref"] = f"sql:{req.sid}:{int(time.time() * 1000) % 100000}"
     return result
 
 

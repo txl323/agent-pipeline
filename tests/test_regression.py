@@ -9,6 +9,7 @@
 
 运行前提：.env 配置 DEEPSEEK_API_KEY 与数据库连接；datasvc(8005) 已启动。
 """
+import asyncio
 import json
 import sys
 import time
@@ -39,18 +40,23 @@ BASELINES = [
 ]
 
 
-def _run(question: str):
+async def _run_async(question: str):
     events = []
-
-    def on_event(name: str, data: dict) -> None:
-        events.append((name, data))
-
+    final: dict = {}
     sid = f"regtest-{int(time.time())}"
-    result = run_agent_stream(
+    async for ev, data in run_agent_stream(
         [{"role": "user", "content": question}],
-        on_event=on_event, sid=sid,
-    )
-    return result, events
+        sid=sid,
+    ):
+        if ev == "final":
+            final = data
+        else:
+            events.append((ev, data))
+    return final, events
+
+
+def _run(question: str):
+    return asyncio.run(_run_async(question))
 
 
 def _query_plans(events):
@@ -65,8 +71,8 @@ def _query_plans(events):
     return plans
 
 
-def _check_case(question, expect, want_chart):
-    result, events = _run(question)
+async def _check_case(question, expect, want_chart):
+    result, events = await _run_async(question)
     ctx = f"[{question}]"
 
     # 1. 成功：最终回复非空
@@ -104,16 +110,24 @@ def _check_case(question, expect, want_chart):
     return result, events
 
 
-def test_regression_baselines():
+async def _run_all():
     for question, expect, want_chart in BASELINES:
-        _check_case(question, expect, want_chart)
+        await _check_case(question, expect, want_chart)
+
+
+def test_regression_baselines():
+    # 单事件循环跑全部基线：AsyncSqliteSaver 的 asyncio.Lock 绑定首个循环，
+    # 多次 asyncio.run 会触发 bound to a different event loop
+    asyncio.run(_run_all())
 
 
 if __name__ == "__main__":
-    for q, e, c in BASELINES:
-        r, ev = _run(q)
-        reply = (r.get("reply") or "")[:120].replace("\n", " ")
-        plans = _query_plans(ev)
-        charts = [d for n, d in ev if n == "chart"]
-        print(f"Q: {q}")
-        print(f"  plans={len(plans)} charts={len(charts)} reply={reply}")
+    async def _main():
+        for q, e, c in BASELINES:
+            r, ev = await _run_async(q)
+            reply = (r.get("reply") or "")[:120].replace("\n", " ")
+            plans = _query_plans(ev)
+            charts = [d for n, d in ev if n == "chart"]
+            print(f"Q: {q}")
+            print(f"  plans={len(plans)} charts={len(charts)} reply={reply}")
+    asyncio.run(_main())

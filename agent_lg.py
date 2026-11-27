@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.config import get_stream_writer
 from langgraph.checkpoint.memory import InMemorySaver
 
 import skill_runtime as sr
@@ -32,14 +32,23 @@ import nlsql
 
 load_dotenv()
 # ---------------- LangGraph 状态能力（阶段③） ----------------
-# Checkpointer：默认内存版；设 LG_CHECKPOINT_DB=路径 时用 SQLite 持久化（重启不丢状态）
+# Checkpointer：默认内存版；设 LG_CHECKPOINT_DB=路径 时用 SQLite 持久化（重启不丢状态）。
+# AsyncSqliteSaver 需要 running event loop，延迟到首次 async 调用时创建。
 _CHECKPOINT_DB = os.environ.get("LG_CHECKPOINT_DB", "")
-if _CHECKPOINT_DB:
-    import sqlite3
-    from langgraph.checkpoint.sqlite import SqliteSaver
-    _CHECKPOINTER = SqliteSaver(sqlite3.connect(_CHECKPOINT_DB, check_same_thread=False))
-else:
-    _CHECKPOINTER = InMemorySaver()
+_CHECKPOINTER: Any = None
+
+
+async def _get_checkpointer() -> Any:
+    global _CHECKPOINTER
+    if _CHECKPOINTER is None:
+        if _CHECKPOINT_DB:
+            import aiosqlite
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+            conn = await aiosqlite.connect(_CHECKPOINT_DB)
+            _CHECKPOINTER = AsyncSqliteSaver(conn)
+        else:
+            _CHECKPOINTER = InMemorySaver()
+    return _CHECKPOINTER
 # 确认门：高基维度（全量无过滤时结果集可能较大）
 _HIGH_CARD_DIMS = {"customer", "material_code"}
 
@@ -98,11 +107,12 @@ def _gate_reason(fname: str, args: dict) -> str:
     return ""
 
 
-def list_state_history(thread_id: str, limit: int = 20) -> list[dict]:
+async def list_state_history(thread_id: str, limit: int = 20) -> list[dict]:
     """状态回放：列出线程的检查点历史（step/步数/待执行工具/回复摘要）。"""
     out: list[dict] = []
     try:
-        for t in _CHECKPOINTER.list({"configurable": {"thread_id": thread_id}}, limit=limit):
+        cp = await _get_checkpointer()
+        async for t in cp.alist({"configurable": {"thread_id": thread_id}}, limit=limit):
             cv = t.checkpoint.get("channel_values") or {}
             out.append({
                 "checkpoint_id": t.config.get("configurable", {}).get("checkpoint_id", ""),
@@ -133,7 +143,7 @@ SYSTEM_PROMPT = """你是一个能干的智能助手，通过技能（skills）�
 4. 数据复用：同一会话内已查到的数据直接复用，严禁对同一数据反复查询；
 5. 失败处理：工具返回 ok=false 时，根据 error 提示修正后重试（换指标名/维度名/调整 SQL），不要原样重试；
 6. 歧义处理：用户问法有歧义时，先用选项式反问澄清，回复末尾加【待确认】标记；
-7. 画图规范：分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类 draw=false；中间步骤查询一律 draw=false；
+7. 画图规范：分布/趋势/占比/对比类多行数据 draw=true；结构/字段/单值/清单类 draw=false；中间步骤查询一律 draw=false；需要更合适图型（scatter/dual/stacked）或多图拆分时，先 load_skill 加载 chart 技能，用 validate_spec 校验轻量 spec（mark 六选一 + encoding 字段名必须是结果集真实列名，spec 不含任何数字），校验通过后用 build_option 生成图表；非法 spec 按错误提示修正后重试，仍非法走默认图型；
 8. 导出门槛：export_csv 仅在用户消息中出现明确导出意图（导出/下载/保存文件/要 CSV/拿明细文件）时才可使用；用户只是想看数据时一律用 data-query 查询展示，禁止擅自导出文件；意图模糊时先反问确认；
 9. 回答规范：所有数字必须来自工具返回结果，严禁编造；结果已图表化展示时回复只写 3-5 句关键结论；对比类问题必须覆盖最高/最低/差距/异常；引用 URL 必须真实。结果 ≤ 20 行时必须逐项列全每一条，禁止用『第五名』『其余』『另一个』等模糊指代代替未列出的项。
 
@@ -184,11 +194,11 @@ def _build_skill_tools(skills: dict) -> tuple[list[dict], dict, dict]:
 _PARAM_SCHEMAS = {
     "query_data": ({"plan_json": {"type": "string", "description": "Plan JSON 字符串，格式：{\"metric\": \"sales_amount\", \"dimensions\": [\"customer_region\"], \"filters\": [...], \"time_macro\": \"all\"}"},
                     "draw": {"type": "boolean", "description": "是否生成图表"},
-                    "chart_type": {"type": "string", "enum": ["bar", "pie", "line", "auto"]}}, ["plan_json"]),
+                    "chart_type": {"type": "string", "enum": ["bar", "pie", "line", "scatter", "dual", "stacked", "auto"]}}, ["plan_json"]),
     "free_query": ({"sql": {"type": "string", "description": "SELECT 语句，表带库名前缀如 sap_mock.sap_sales_orders"},
                      "params_json": {"type": "string", "description": "参数 JSON 数组"},
                      "draw": {"type": "boolean"},
-                     "chart_type": {"type": "string", "enum": ["bar", "pie", "line", "auto"]}}, ["sql"]),
+                     "chart_type": {"type": "string", "enum": ["bar", "pie", "line", "scatter", "dual", "stacked", "auto"]}}, ["sql"]),
     "explore_schema": ({"database": {"type": "string", "description": "库名：bom_system/mdm_platform/sap_mock"},
                         "table": {"type": "string", "description": "表名"}}, []),
     "table_stats": ({"database": {"type": "string"}, "table": {"type": "string"}}, ["database", "table"]),
@@ -198,6 +208,8 @@ _PARAM_SCHEMAS = {
     "export_csv": ({"sql": {"type": "string", "description": "SELECT 语句"},
                     "filename": {"type": "string", "description": "导出文件名（可选）"}}, ["sql"]),
     "load_skill": ({"skill_name": {"type": "string", "description": "要加载的技能名，如 data-query / web-search / export-csv"}}, ["skill_name"]),
+    "validate_spec": ({"spec_json": {"type": "string", "description": "轻量图表 spec JSON 字符串，格式：{\"charts\": [{\"mark\": \"bar\", \"encoding\": {\"x\": \"列名\", \"y\": [\"数值列\"]}}]}，mark 六选一 bar/pie/line/scatter/dual/stacked，encoding 字段名必须是结果集真实列名，spec 不含任何数字"}}, ["spec_json"]),
+    "build_option": ({"spec_json": {"type": "string", "description": "已通过 validate_spec 校验的轻量 spec JSON 字符串"}}, ["spec_json"]),
 }
 
 
@@ -285,17 +297,21 @@ def _collect_evidence(tool: str, args: dict, result, evidences: list) -> None:
             evidences.append({"url": url[:768], "title": "", "excerpt": result[:500]})
 
 
-def run_agent_stream(messages: list[dict], mode: str = "standard",
-                      on_event: Callable[[str, dict], None] = lambda e, d: None,
-                      plan: dict | None = None, sid: str = "",
-                      user_regions: list[str] | None = None,
-                      thread_id: str = "",
-                      confirm_handler: Callable[[dict], bool] | None = None,
-                      resume_value: Any = None) -> dict:
-    """LangGraph 主入口：与原版 run_agent_stream 签名/返回兼容。
+async def run_agent_stream(messages: list[dict], mode: str = "standard",
+                           plan: dict | None = None, sid: str = "",
+                           user_regions: list[str] | None = None,
+                           thread_id: str = "",
+                           confirm_handler: Callable[[dict], Any] | None = None):
+    """LangGraph 原生流式主入口：异步生成器，逐项产出 (event, payload)。
+
+    - LLM token 流由 graph.astream(stream_mode=["messages","custom"]) 框架事件路由：
+      reasoning_content -> thinking；content -> reply（逐 token，不攒）
+    - 业务事件（status/tool_start/tool_end/skill_loaded/replan/chart/confirm_request）
+      由节点内 get_stream_writer() 写入 custom 流，此处透传
+    - 最后产出 ("final", {reply, steps, evidences, trace, report})
     user_regions：区域权限（服务端注入，None 不受限），经 _ctx 下传数据服务，不进 LLM schema。
+    confirm_handler：异步回调 async fn(payload) -> bool（确认门，保留回调式，不切原生 HITL）。
     """
-    emit = on_event
     skills = sr.load_skills()
     sr.init_memory()
     tools, registry, skill_of = _build_skill_tools(skills)
@@ -340,21 +356,22 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
             "\n【计划缓存】该问题此前已执行过查询计划且成功，直接复用（不要重新规划）：\n"
             + _cached_plan +
             "\n先 load_skill 加载 data-query 技能，然后按上述计划原样调用 query_data（参数不变），拿到结果后直接作答。")
-        emit("status", {"text": "（命中计划缓存，复用已确认查询计划）"})
+        yield ("status", {"text": "（命中计划缓存，复用已确认查询计划）"})
     # 本轮成功计划采集容器（首个成功的 query_data 计划）
     _good_plan: list[str] = []
     # ---------------- 图节点 ----------------
 
-    def agent_node(state: AgentState) -> dict:
-        """agent 节点：LLM 流式决策。"""
+    async def agent_node(state: AgentState) -> dict:
+        """agent 节点：LLM 流式决策。
+        节点内不再手写 thinking/reply emit：逐 token 由框架 messages 模式
+        （按 metadata['langgraph_node']=='agent_node' 过滤）路由。"""
         tc_acc: dict[int, dict] = {}
         buffer = ""
-        for chunk in llm.stream(state["messages"]):
-            rc = getattr(chunk, "additional_kwargs", {}).get("reasoning_content")
-            if rc:
-                emit("thinking", {"text": rc})
+        async for chunk in llm.astream(state["messages"]):
             if chunk.content:
                 buffer += chunk.content
+                # 逐 token 流式推送（custom 通道）：前端累积渲染，过程话术轮在 tool_start 时清空
+                get_stream_writer()(("reply", {"text": chunk.content}))
             for tcc in (getattr(chunk, "tool_call_chunks", None) or []):
                 idx = tcc.get("index") if tcc.get("index") is not None else 0
                 acc = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
@@ -380,17 +397,14 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
         # 不混入正式回复与会话历史；最终回复一次性 emit（不逐字流式）
         if norm:
             if buffer:
-                emit("status", {"text": buffer})
-        else:
-            if buffer:
-                emit("reply", {"text": buffer})
+                get_stream_writer()(("status", {"text": buffer}))
         ai = AIMessage(content=buffer if buffer else "（正在调用工具）")
         if norm:
             ai.tool_calls = norm
         return {"messages": state["messages"] + [ai], "pending_calls": norm,
                 "final_reply": buffer, "steps": state["steps"] + 1}
 
-    def skill_node(state: AgentState) -> dict:
+    async def skill_node(state: AgentState) -> dict:
         """skill_exec 节点：执行技能函数 + 记忆写入。"""
         msgs = list(state["messages"])
         trace = list(state["trace"])
@@ -404,7 +418,7 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {}
-            emit("tool_start", {"tool": fname, "args": args})
+            get_stream_writer()(("tool_start", {"tool": fname, "args": args}))
             if fname == "load_skill":
                 # 渐进式披露第二层：按需加载技能正文
                 sname = str(args.get("skill_name", "")).strip()
@@ -414,9 +428,9 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     ver = sk.version if sk else "unknown"
                     loaded_skills.add(sname)
                     result = {"ok": True, "skill": sname, "version": ver, "body": body}
-                    emit("skill_loaded", {"skill": sname, "version": ver,
+                    get_stream_writer()(("skill_loaded", {"skill": sname, "version": ver,
                                           "body_path": f"skills/{sname}/SKILL.md",
-                                          "resources": [f"skills/{sname}/SKILL.md"]})
+                                          "resources": [f"skills/{sname}/SKILL.md"]}))
                 except Exception as e:  # noqa: BLE001
                     result = {"ok": False, "error": f"技能加载失败: {e}"}
             elif skill_of.get(fname) and skill_of[fname] not in loaded_skills:
@@ -434,13 +448,13 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                         gate_payload = {"tool": fname, "reason": reason,
                                         "args": {k: args.get(k) for k in ("sql", "plan_json") if k in args}}
                         if confirm_handler is not None:
-                            # 服务端路径：同步阻塞等待用户应答（SSE confirm_request + /api/confirm）
-                            approved = bool(confirm_handler(gate_payload))
+                            # 服务端路径：异步回调等待用户应答（confirm_request 由 server 发出）
+                            approved = bool(await confirm_handler(gate_payload))
                         else:
-                            # LangGraph 原生路径：interrupt 中断，Command(resume=...) 恢复
-                            approved = interrupt(gate_payload)
+                            # 无确认通道时的兜底：拒绝执行，防止敏感查询旁路
+                            approved = False
                         if not approved:
-                            emit("tool_end", {"tool": fname, "preview": "用户已拒绝本次查询"})
+                            get_stream_writer()(("tool_end", {"tool": fname, "preview": "用户已拒绝本次查询"}))
                             trace.append({"round": step, "tool": fname,
                                           "query": "（确认门：用户拒绝）" + str(args)[:100], "urls": []})
                             msgs.append(ToolMessage(content="用户拒绝了本次查询。注意：这是用户明确意愿，禁止再用 free_query 或同类大范围查询重试（会被再次拒绝）。只能：①改用语义层 query_data 并加时间范围/过滤条件缩小结果集；②或直接基于已有数据回答，并向用户说明被拒原因与替代问法",
@@ -449,6 +463,17 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     try:
                         if fname in ("query_data", "free_query"):
                             result = fn(**args, _ctx={"user_regions": user_regions, "sid": sid})
+                        elif fname in ("validate_spec", "build_option") and chart_candidate:
+                            # chart 技能：数据由系统注入暂存的查询结果（模型只出轻量 spec，不传数据）
+                            spec = json.loads(args.get("spec_json") or "{}")
+                            data = chart_candidate[-1]
+                            if fname == "validate_spec":
+                                ok, err = fn(spec, data.get("columns", []))
+                                result = {"ok": ok, "valid": ok, "error": err,
+                                          "columns": data.get("columns", [])}
+                            else:
+                                chartspec = fn(spec, data)
+                                result = {"ok": True, **chartspec}
                         else:
                             result = fn(**args)
                     except TypeError:
@@ -459,7 +484,7 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     except Exception as e:  # noqa: BLE001
                         result = {"ok": False, "error": f"执行失败: {e}"}
             preview = json.dumps(result, ensure_ascii=False)[:200] if not isinstance(result, str) else result[:200]
-            emit("tool_end", {"tool": fname, "preview": preview})
+            get_stream_writer()(("tool_end", {"tool": fname, "preview": preview}))
             # 图表候选：查询成功且非单行且 draw 时暂存（不立即推送，避免被后续图替换导致忽快忽慢）
             if (fname in ("query_data", "free_query") and isinstance(result, dict)
                     and result.get("ok") and result.get("draw", True)
@@ -477,6 +502,15 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                     "sem_ver": result.get("sem_ver", ""),
                     "chart_type": result.get("chart_type", "auto"),
                 })
+            if fname == "build_option" and isinstance(result, dict) and result.get("ok") and chart_candidate:
+                # ChartSpec 合并进当前候选：收尾只推最后一张（前端优先渲染 option，旧字段保留兼容）
+                chart_candidate[-1].update({
+                    "kind": result.get("kind", "echarts"),
+                    "chart_type": result.get("chart_type", ""),
+                    "title": result.get("title", ""),
+                    "option": result.get("option", {}),
+                    "data_ref": result.get("data_ref", ""),
+                })
             if fname == "query_data" and isinstance(result, dict) and result.get("ok") and not _good_plan:
                 _good_plan.append(str(args.get("plan_json") or ""))
             _collect_evidence(fname, args, result, evidences)
@@ -492,12 +526,12 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
                                     tool_call_id=str(tc.get("id") or f"call_{step}")))
         return {"messages": msgs, "trace": trace, "evidences": evidences, "pending_calls": []}
 
-    def verify_node(state: AgentState) -> dict:
+    async def verify_node(state: AgentState) -> dict:
         """verify 节点：数据充分性检查（PASS/补充/REPLAN）。"""
         msgs = list(state["messages"])
         trace = list(state["trace"])
         try:
-            resp = verify_llm.invoke([SystemMessage(content=_VERIFY_SYSTEM)] + msgs[-12:])
+            resp = await verify_llm.ainvoke([SystemMessage(content=_VERIFY_SYSTEM)] + msgs[-12:])
             text = (resp.content or "").strip()
         except Exception:  # noqa: BLE001
             text = ""
@@ -507,7 +541,7 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
         if text.startswith("REPLAN:"):
             adjust = text[len("REPLAN:"):].strip()
             trace.append({"round": step, "tool": "replan", "query": "计划调整：" + adjust[:120], "urls": []})
-            emit("replan", {"reason": adjust[:200]})
+            get_stream_writer()(("replan", {"reason": adjust[:200]}))
             msgs.append(HumanMessage(content=f"（计划调整：原计划部分步骤不可行，{adjust}。请按调整后的做法继续执行，完成剩余步骤后给出最终回复。）"))
         else:
             trace.append({"round": step, "tool": "verify", "query": "数据不足：" + text[:120], "urls": []})
@@ -537,48 +571,48 @@ def run_agent_stream(messages: list[dict], mode: str = "standard",
     g.add_conditional_edges("agent", route_after_agent, {"skill_exec": "skill_exec", "verify": "verify", END: END})
     g.add_edge("skill_exec", "agent")
     g.add_conditional_edges("verify", route_after_verify, {"agent": "agent", END: END})
-    graph = g.compile(checkpointer=_CHECKPOINTER)
+    graph = g.compile(checkpointer=await _get_checkpointer())
     # 线程绑定（阶段③）：thread_id 绑会话，检查点跨调用持久化，支持状态回放
     cfg = {"configurable": {"thread_id": thread_id or sid or "default"},
            "recursion_limit": 4 * MAX_STEPS}
 
     init: AgentState = {"messages": hist, "trace": [], "evidences": [],
                         "verify_rounds": 0, "steps": 0, "pending_calls": [], "final_reply": ""}
-    # 步数上限保护：MAX_STEPS 轮 agent 决策后强制收尾
+    # 原生流式主循环：一次 graph.astream 跑完整张图（recursion_limit 兜底步数上限），
+    # messages 模式路由 LLM 逐 token 流，custom 模式透传节点内 get_stream_writer 业务事件。
     final_state = init
-    _resuming = resume_value is not None
-    for _ in range(MAX_STEPS):
-        if _resuming:
-            # 从 interrupt 断点恢复：状态由检查点提供，Command(resume=...) 送达中断点
-            final_state = graph.invoke(Command(resume=resume_value), config=cfg)
-            _resuming = False
-        else:
-            final_state = graph.invoke(final_state, config=cfg)
-        if isinstance(final_state, dict) and final_state.get("__interrupt__"):
-            # LangGraph 原生 interrupt：推送确认请求并提前返回，下次调用传 resume_value 恢复
-            intr = final_state["__interrupt__"][0]
-            payload = intr.value if isinstance(intr.value, dict) else {"detail": str(intr.value)}
-            emit("confirm_request", payload)
-            return {"reply": "", "steps": final_state.get("steps", 0),
-                    "evidences": final_state.get("evidences", []),
-                    "trace": final_state.get("trace", []),
-                    "report": None, "interrupted": payload}
-        if not final_state["pending_calls"]:
-            # 无待执行工具即结束（verify 回环已在图内完成或判定通过）
-            if final_state["messages"] and not isinstance(final_state["messages"][-1], HumanMessage):
-                break
-            if not final_state["pending_calls"] and _verify_passed(final_state):
-                break
-        break
+    async for mode_, chunk in graph.astream(init, config=cfg, stream_mode=["messages", "custom"]):
+        if mode_ == "messages":
+            msg, meta = chunk
+            if not isinstance(meta, dict) or meta.get("langgraph_node") != "agent":
+                continue
+            if getattr(msg, "type", "") != "ai":  # 只转发 AI 生成 token，跳过 System/Human 输入回放
+                continue
+            rc = getattr(msg, "additional_kwargs", {}).get("reasoning_content")
+            if rc:
+                yield ("thinking", {"text": rc})
+            # reply 不经 messages 通道转发：该通道回放节点完成后的整条消息，
+            # 逐 token 流式已由 agent_node 内 get_stream_writer 推送，此处转发会重复
+        else:  # custom：业务事件透传
+            if isinstance(chunk, (tuple, list)) and len(chunk) == 2:
+                yield (chunk[0], chunk[1])
+            else:
+                yield ("status", {"text": str(chunk)})
+    # 图执行完成后从检查点取最终状态（checkpointer 保留，供 /api/history 状态回放）
+    snap = await graph.aget_state(cfg)
+    if snap is not None and getattr(snap, "values", None):
+        final_state = snap.values
 
-    # 统一出图：验证通过/流程收尾后推送最终唯一一张图（候选被后续图替换时只保留最后一张）
+    # 统一出图：验证通过/流程收尾后推送最终唯一一张图
     if chart_candidate:
-        emit("chart", chart_candidate[-1])
+        yield ("chart", chart_candidate[-1])
     # plan 缓存写入（阶段B）：本轮有成功计划且最终回复非空时缓存
     if _good_plan and final_state.get("final_reply"):
         _plan_cache_store(_last_question, _good_plan[0])
-    return {"reply": final_state["final_reply"], "steps": final_state["steps"],
-            "evidences": final_state["evidences"], "trace": final_state["trace"], "report": None}
+    yield ("final", {"reply": final_state.get("final_reply", ""),
+                     "steps": final_state.get("steps", 0),
+                     "evidences": final_state.get("evidences", []),
+                     "trace": final_state.get("trace", []), "report": None})
 
 
 def _verify_passed(state: AgentState) -> bool:
@@ -593,7 +627,7 @@ def _client():
                   base_url=os.environ["DEEPSEEK_BASE_URL"])
 
 
-_PLAN_SYSTEM = "你是任务规划师。判断任务复杂度：简单问题（单次查询/单次搜索/查天气/闲聊/翻译/单条数据统计）只回复 {\"complex\": false}；复杂任务（多工具组合/多阶段分析/跨库对比/导出报告）回复 {\"complex\": true, \"steps\": [\"步骤1\", \"步骤2\", ...]}，步骤 2-6 个，每步一句话，必须具体到要调用的工具和要处理的数据对象（如『查询 sap_sales_orders 各区域销售额』），禁止『明确需求』『整理结果』『汇总反馈』这类无信息量的模板步骤。只输出 JSON，不要其他内容。"
+_PLAN_SYSTEM = "你是任务规划师。判断任务复杂度：简单问题（单次查询/单次搜索/查天气/闲聊/翻译/单条数据统计）只回复 {\"complex\": false}；复杂任务（多工具组合/多阶段分析/跨库对比/导出报告）回复 {\"complex\": true, \"steps\": [\"步骤1\", \"步骤2\", ...]}，步骤 2-6 个，每步一句话，必须具体到要调用的工具和要处理的数据对象（如『查询 sap_sales_orders 各区域销售额』），禁止『明确需求』『整理结果』『汇总反馈』这类无信息量的模板步骤。只输出 JSON，不要其他内容。输出格式必须是 {\"complex\": false} 或 {\"complex\": true, \"steps\": [\"...\", ...]}，顶层只允许 complex 和 steps 两个键，禁止 task/analysis/plan 等其他结构。"
 
 
 def generate_plan(task: str) -> dict | None:
@@ -613,8 +647,24 @@ def generate_plan(task: str) -> dict | None:
             if text.startswith("json"):
                 text = text[4:]
         plan = json.loads(text)
-        if isinstance(plan, dict) and plan.get("complex") and plan.get("steps"):
-            return plan
+        if not isinstance(plan, dict):
+            return None
+        # 容错：LLM 可能返回 {"plan": [{"step": ...}, ...]} 结构，提取步骤文本
+        steps = plan.get("steps")
+        if not steps and isinstance(plan.get("plan"), list):
+            steps = []
+            for s in plan["plan"]:
+                if isinstance(s, str):
+                    steps.append(s)
+                elif isinstance(s, dict):
+                    steps.append(str(s.get("step") or s.get("description") or s.get("action") or "").strip())
+            steps = [s for s in steps if s]
+        # complex 缺失时由 steps 存在性推断
+        complex_flag = plan.get("complex")
+        if complex_flag is None:
+            complex_flag = bool(steps)
+        if complex_flag and steps:
+            return {"complex": True, "steps": steps}
         return None
     except Exception:  # noqa: BLE001
         return None
@@ -622,14 +672,17 @@ def generate_plan(task: str) -> dict | None:
 
 if __name__ == "__main__":
     import sys
+    import asyncio
     m = sys.argv[1] if len(sys.argv) > 1 else "standard"
     q = " ".join(sys.argv[2:]) or "各区域销售额对比"
 
-    def show(ev, data):
-        if ev == "reply":
-            print(data.get("text", ""), end="", flush=True)
-        elif ev == "tool_start":
-            print(f"\n[tool] {data.get('tool')} {data.get('args')}")
+    async def _demo():
+        async for ev, data in run_agent_stream([{"role": "user", "content": q}], m):
+            if ev == "reply":
+                print(data.get("text", ""), end="", flush=True)
+            elif ev == "tool_start":
+                print(f"\n[tool] {data.get('tool')} {data.get('args')}")
+            elif ev == "final":
+                print(f"\n--- steps={data['steps']} trace={len(data['trace'])}")
 
-    r = run_agent_stream([{"role": "user", "content": q}], m, show)
-    print(f"\n--- steps={r['steps']} trace={len(r['trace'])}")
+    asyncio.run(_demo())

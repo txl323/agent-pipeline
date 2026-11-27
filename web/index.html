@@ -615,6 +615,8 @@ async function send() {
           curThinking.body.scrollTop = curThinking.body.scrollHeight;
           statusEl.textContent = '深度思考中…';
         } else if (eventName === 'tool_start') {
+          // 工具调用开始：清空 AI 气泡中的过程话术（逐 token 流式期间 agent 每轮都有话术），最终回复完整保留
+          if (curAI) { curAI.m.text = ''; renderMarkdown(curAI.el, ''); }
           if (!curTool) curTool = ensurePanel('tool');
           curTool._t0 = Date.now();
           const line = '🔧 ' + payload.tool + ' ' + JSON.stringify(payload.args) + '\n';
@@ -781,6 +783,11 @@ async function send() {
 function renderChart(el, payload) {
   if (typeof echarts === 'undefined') { el.textContent = 'ECharts 未加载'; return; }
   const chart = echarts.init(el);
+  // ChartSpec 路径：后端已生成完整 option 时直接渲染（轻量 spec 模式）
+  if (payload.option && typeof payload.option === 'object' && payload.option.series) {
+    chart.setOption(payload.option);
+    return chart;
+  }
   const cols = payload.columns;
   const rows = payload.rows;
   if (!rows.length) { chart.setOption({title: {text: '无数据', left: 'center', top: 'middle'}}); return; }
