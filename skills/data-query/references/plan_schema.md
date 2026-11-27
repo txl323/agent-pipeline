@@ -1,6 +1,6 @@
 # Plan JSON 参数契约（唯一真相）
 
-> 由语义层 `semantic/semantic_v1.yaml`（version 1.0.1）自动生成。不要手工改本文件；改语义层后执行 sync_semantic --apply/--rollback 会重生成。
+> 由语义层 `semantic/semantic_v1.yaml`（version 1.0.2）自动生成。不要手工改本文件；改语义层后执行 sync_semantic --apply/--rollback 会重生成。
 
 ## 指标（metric）
 
@@ -64,6 +64,8 @@
 | last_7_days | 最近 7 天 |
 | last_30_days | 最近 30 天 |
 | all | 全部数据（默认） |
+| last_month_to_date | last_month_to_date |
+| last_year_same_month | last_year_same_month |
 
 ## 数据范围
 

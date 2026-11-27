@@ -2,7 +2,7 @@
 # 事实表：sap_mock.sap_sales_orders / sap_purchase_orders / sap_inventory
 # 维度数据：mdm_platform（供应商区域/客户区域）
 
-version: "1.0.1"
+version: "1.0.2"
 
 datasources:
   sales: "sap_mock"
@@ -127,6 +127,8 @@ time_macros:
   last_7_days: "macro:last_7_days"
   last_30_days: "macro:last_30_days"
   all: "macro:all"
+  last_month_to_date: "macro:last_month_to_date"
+  last_year_same_month: "macro:last_year_same_month"
 
 # 过滤字段白名单（LLM 只能引用这些字段做过滤）
 filter_fields:

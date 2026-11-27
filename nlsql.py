@@ -82,6 +82,20 @@ def _expand_time_macro(macro: str) -> tuple[str, str] | None:
         return (today - timedelta(days=7)).isoformat(), today.isoformat()
     if macro == "last_30_days":
         return (today - timedelta(days=30)).isoformat(), today.isoformat()
+    if macro == "last_month_to_date":
+        # 上月同期：上月 1 日 ~ 上月与今天相同的日（日数超出上月天数时取上月最后一天）
+        month_end = today.replace(day=1) - timedelta(days=1)
+        day = min(today.day, month_end.day)
+        return month_end.replace(day=1).isoformat(), month_end.replace(day=day).isoformat()
+    if macro == "last_year_same_month":
+        # 去年同期：去年同月 1 日 ~ 去年同月与今天相同的日（对齐天数，同比口径公平）
+        start = today.replace(year=today.year - 1, day=1)
+        if start.month == 12:
+            month_end = start.replace(year=start.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            month_end = start.replace(month=start.month + 1, day=1) - timedelta(days=1)
+        day = min(today.day, month_end.day)
+        return start.isoformat(), start.replace(day=day).isoformat()
     return None
 
 
@@ -114,6 +128,9 @@ def validate_plan(plan: dict) -> tuple[bool, str]:
     tm = plan.get("time_macro")
     if tm and tm not in sem.get("time_macros", {}):
         return False, f"未知时间宏: {tm}"
+    cp = plan.get("compare")
+    if cp and cp not in ("mom", "yoy"):
+        return False, f"未知 compare: {cp}，可选: mom(环比)/yoy(同比)"
     return True, ""
 
 
@@ -290,6 +307,11 @@ def run_plan(plan_json: str, allowed_regions: list[str] | None = None, sid: str 
     ok, err = validate_plan(plan)
     if not ok:
         return {"ok": False, "error": err}
+    compare = plan.get("compare")
+    if compare:
+        # 同环比：本期强制 this_month（至今），对比期在执行后追加查询
+        plan = dict(plan)
+        plan["time_macro"] = "this_month"
     try:
         sql, params, ds = compile_sql(plan, allowed_regions)
     except PermissionError as e:
@@ -307,7 +329,43 @@ def run_plan(plan_json: str, allowed_regions: list[str] | None = None, sid: str 
         result["artifact_ref"] = save_result(result, sid)
     except Exception:  # noqa: BLE001
         pass
+    if compare:
+        prev_macro = "last_month_to_date" if compare == "mom" else "last_year_same_month"
+        prev_plan = dict(plan)
+        prev_plan["time_macro"] = prev_macro
+        prev_plan.pop("compare", None)
+        prev = run_plan(json.dumps(prev_plan, ensure_ascii=False), allowed_regions=allowed_regions, sid=sid)
+        if prev.get("ok"):
+            result["compare"] = _build_compare(compare, result, prev)
+        else:
+            result["compare"] = {"type": compare, "error": prev.get("error", "对比期查询失败")}
     return result
+
+
+def _build_compare(compare_type: str, cur: dict, prev: dict) -> dict:
+    """两期结果按维度键对齐并计算增幅（代码侧计算，不依赖模型心算）。"""
+    dims = (cur.get("columns") or [])[1:]
+    cur_map = {tuple(r[1:]): r[0] for r in cur.get("rows", [])}
+    prev_map = {tuple(r[1:]): r[0] for r in prev.get("rows", [])}
+    keys = list(dict.fromkeys(list(cur_map) + list(prev_map)))
+    rows = []
+    for k in keys:
+        c = cur_map.get(k)
+        p = prev_map.get(k)
+        growth = round((c - p) / p * 100, 1) if (c is not None and p) else None
+        rows.append(list(k) + [c, p, growth])
+    prev_macro = "last_month_to_date" if compare_type == "mom" else "last_year_same_month"
+    label = "上月同天数" if compare_type == "mom" else "去年同月同天数"
+    return {
+        "type": compare_type,
+        "periods": {
+            "current": list(_expand_time_macro("this_month") or ()),
+            "previous": list(_expand_time_macro(prev_macro) or ()),
+        },
+        "columns": list(dims) + ["current", "previous", "growth_pct"],
+        "rows": rows,
+        "note": "同期对齐口径：本月至今 vs " + label + "；growth_pct=(本期-上期)/上期×100，上期为 0/缺失时为 null",
+    }
 
 
 # ---------------- 可追溯：artifact 落库 ----------------
